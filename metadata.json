@@ -1,0 +1,8 @@
+{
+  "name": "TruckCEO",
+  "description": "A smart logistics and route management platform for bread distributors, featuring AI-powered inventory forecasting, fleet maintenance tracking, and employee engagement dashboards.",
+  "requestFramePermissions": [
+    "geolocation",
+    "microphone"
+  ]
+}
