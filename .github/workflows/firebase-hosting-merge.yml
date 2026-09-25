@@ -35,8 +35,4 @@ jobs:
           workload_identity_provider: 'projects/419699908912/locations/global/workloadIdentityPools/github-actions-pool/providers/github-provider'
           service_account: 'github-actions-deployer@truck-ceo.iam.gserviceaccount.com'
 
-      - uses: FirebaseExtended/action-hosting-deploy@v0
-        with:
-          repoToken: ${{ secrets.GITHUB_TOKEN }}
-          channelId: live
-          projectId: truck-ceo
+      - run: npx -y firebase-tools@latest deploy --only hosting --project truck-ceo
