@@ -1,0 +1,42 @@
+name: Deploy to Firebase Hosting on merge
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build_and_deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci && npm run build
+        env:
+          VITE_FIREBASE_API_KEY: AIzaSyAf60UgNSyncGk-6j55UXjZ1U54IxJpIQU
+          VITE_FIREBASE_AUTH_DOMAIN: truck-ceo.firebaseapp.com
+          VITE_FIREBASE_PROJECT_ID: truck-ceo
+          VITE_FIREBASE_STORAGE_BUCKET: truck-ceo.firebasestorage.app
+          VITE_FIREBASE_MESSAGING_SENDER_ID: "419699908912"
+          VITE_FIREBASE_APP_ID: 1:419699908912:web:24d85875480487de03e8f5
+
+      - id: gcp-auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: 'projects/419699908912/locations/global/workloadIdentityPools/github-actions-pool/providers/github-provider'
+          service_account: 'github-actions-deployer@truck-ceo.iam.gserviceaccount.com'
+
+      - uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          channelId: live
+          projectId: truck-ceo
