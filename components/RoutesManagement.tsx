@@ -5,6 +5,7 @@ import { useToast } from '../hooks/useToast';
 import { ToastContainer } from './ToastContainer';
 import { RouteFormModal } from './forms/RouteFormModal';
 import { StoreFormModal } from './forms/StoreFormModal';
+import { DriverInvite } from './DriverInvite';
 import { ConfirmDialog } from './ConfirmDialog';
 
 export const RoutesManagement: React.FC = () => {
@@ -227,6 +228,9 @@ export const RoutesManagement: React.FC = () => {
                       Delete Route
                     </button>
                   </div>
+
+                  {/* Driver Invite Codes */}
+                  <DriverInvite routeId={route.id} routeName={route.name} />
 
                   {/* Stores Section */}
                   <div>
