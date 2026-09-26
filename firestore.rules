@@ -1,0 +1,70 @@
+# Firestore + Storage security rules for the TruckCEO role model
+# ------------------------------------------------------------------
+# These are NOT auto-deployed (firebase.json only deploys hosting).
+# Apply them in the Firebase console: Firestore Database > Rules
+# (and Storage > Rules for the second block), then Publish.
+#
+# Model:
+#   users/{uid}                -> { role: 'business_owner' | 'team_member', businessId, employeeId?, routeIds? }
+#   inviteCodes/{CODE}         -> global lookup for driver join (readable by any authed user)
+#   businesses/{bid}/...      -> everything under a business is tenant-isolated
+#   businesses/{bid}/routes/{rid}/eod|photos|updates -> driver-submitted data
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAuthed() {
+      return request.auth != null;
+    }
+
+    function myProfile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function myBusiness() {
+      return myProfile().businessId;
+    }
+
+    // Invite codes: any signed-in user can read (driver join flow).
+    // Only owners create them (via the app, which writes both docs).
+    match /inviteCodes/{code} {
+      allow read: if isAuthed();
+      allow create: if isAuthed() && myProfile().role == 'business_owner';
+      allow update: if isAuthed(); // usedCount increment on join
+      allow delete: if isAuthed() && myProfile().role == 'business_owner';
+    }
+
+    // Users: you can read/create/update your own doc.
+    // Owners can read the user docs of their business members.
+    match /users/{uid} {
+      allow read: if isAuthed() && (request.auth.uid == uid || myBusiness() == resource.data.businessId);
+      allow create: if isAuthed() && request.auth.uid == uid;
+      allow update: if isAuthed() && request.auth.uid == uid;
+    }
+
+    // Businesses: full tenant isolation. You can only touch your own business.
+    match /businesses/{bid} {
+      allow read, write: if isAuthed() && myBusiness() == bid;
+      match /{subcollection=**} {
+        allow read, write: if isAuthed() && myBusiness() == bid;
+      }
+    }
+  }
+}
+
+# ------------------------------------------------------------------
+# Storage rules (Firebase console > Storage > Rules):
+#
+# rules_version = '2';
+# service firebase.storage {
+#   match /b/{bucket}/o {
+#     function isAuthed() { return request.auth != null; }
+#     function myBusiness() {
+#       return firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.businessId;
+#     }
+#     match /driver-photos/{bid}/{rid}/{day}/{file} {
+#       allow read, write: if isAuthed() && myBusiness() == bid;
+#     }
+#   }
+# }

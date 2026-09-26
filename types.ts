@@ -90,3 +90,53 @@ export interface RouteTerritory {
 }
 
 export type View = 'dashboard' | 'ordering' | 'team' | 'fleet' | 'promos' | 'data_hub' | 'weather' | 'navigation' | 'settings' | 'routes_management';
+
+// ===== Driver app (role-based) =====
+
+export interface InviteCode {
+  code: string;
+  businessId: string;
+  routeId: string;
+  routeName: string;
+  createdBy: string;
+  createdAt: any;
+  usedCount: number;
+}
+
+export interface DriverEod {
+  id?: string;
+  date: string; // yyyy-mm-dd
+  piecesLeft: number;
+  stalesPulled: number;
+  stopsCompleted: string;
+  endLocation: string;
+  outlook: string;
+  submittedAt: any;
+  submittedBy: string;
+  driverName: string;
+}
+
+export type PhotoMoment = 'start' | 'work' | 'end';
+
+export interface RoutePhoto {
+  id?: string;
+  storagePath: string;
+  downloadUrl: string;
+  moment: PhotoMoment;
+  storeId?: string | null;
+  storeName?: string | null;
+  aiStatus: 'pending' | 'sorted';
+  category?: string | null;
+  compliance?: 'match' | 'flag' | null;
+  uploadedAt: any;
+  uploadedBy: string;
+  driverName: string;
+}
+
+export interface RouteUpdate {
+  id?: string;
+  text: string;
+  createdAt: any;
+  authorName: string;
+  authorId: string;
+}

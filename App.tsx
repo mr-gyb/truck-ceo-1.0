@@ -4,6 +4,8 @@ import { View, SaleAlert, RouteTerritory, Store } from './types';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { DataProvider, useData } from './contexts/DataContext';
 import { AuthScreen } from './components/AuthScreen';
+import { RolePicker } from './components/RolePicker';
+import { DriverHome } from './components/DriverHome';
 import { Layout } from './components/Layout';
 import { SmartOrdering } from './components/SmartOrdering';
 import { EmployeeEngagement } from './components/EmployeeEngagement';
@@ -23,7 +25,7 @@ import { BUSINESS_NAME } from './constants';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 
 const AppContent: React.FC = () => {
-  const { currentUser, userProfile, loading: authLoading } = useAuth();
+  const { currentUser, userProfile, loading: authLoading, needsRoleSelection } = useAuth();
   const { products, employees, trucks, saleAlerts, routes, loading: dataLoading } = useData();
   const [activeView, setActiveView] = useState<View>('dashboard');
   const [currentRoute, setCurrentRoute] = useState<RouteTerritory | null>(null);
@@ -41,8 +43,23 @@ const AppContent: React.FC = () => {
   }
 
   // Show auth screen if not logged in
-  if (!currentUser || !userProfile) {
+  if (!currentUser) {
     return <AuthScreen />;
+  }
+
+  // New signup: ask owner vs driver before creating any profile
+  if (needsRoleSelection) {
+    return <RolePicker />;
+  }
+
+  // Safety net: authed but no profile (shouldn't normally happen)
+  if (!userProfile) {
+    return <AuthScreen />;
+  }
+
+  // Drivers get the dedicated driver interface
+  if (userProfile.role === 'team_member') {
+    return <DriverHome />;
   }
 
   // Show loading screen while data is loading
