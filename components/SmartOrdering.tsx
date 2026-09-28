@@ -44,8 +44,10 @@ export const SmartOrdering: React.FC<SmartOrderingProps> = ({
 
   const fetchSuggestions = async () => {
     setLoading(true);
-    // Passing currentStore context to AI would be better but keeping simple for demo
-    const data = await getSmartOrderSuggestions(products, date);
+    const data = await getSmartOrderSuggestions(products, date, undefined, {
+      businessId: userProfile?.businessId ?? '',
+      routeId: currentRoute?.id ?? null,
+    });
     setSuggestions(data);
     setLoading(false);
   };
@@ -149,9 +151,23 @@ export const SmartOrdering: React.FC<SmartOrderingProps> = ({
 
       <div className="space-y-4">
         <div className="flex justify-between items-center px-4">
-          <h3 className="font-black text-[10px] uppercase tracking-[0.25em] text-gray-400">Inventory Forecast</h3>
+          <div>
+            <h3 className="font-black text-[10px] uppercase tracking-[0.25em] text-gray-400">Inventory Forecast</h3>
+            <p className="text-[9px] font-bold text-gray-400 uppercase tracking-widest mt-1">
+              Signals: driver end-of-day reports + live forecast
+            </p>
+          </div>
           {loading && <i className="fas fa-spinner fa-spin text-[#FFD700]"></i>}
         </div>
+
+        {!loading && suggestions.length === 0 && (
+          <div className="bg-white p-8 rounded-[2.5rem] border border-gray-100 text-center">
+            <i className="fas fa-inbox text-gray-200 text-3xl mb-4"></i>
+            <p className="text-[11px] font-bold text-gray-500 uppercase tracking-widest leading-relaxed">
+              No signals yet — suggestions appear as drivers submit end-of-day reports.
+            </p>
+          </div>
+        )}
 
         {suggestions.map((suggestion) => {
           const product = products.find(p => p.id === suggestion.productId);

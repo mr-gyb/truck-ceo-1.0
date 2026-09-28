@@ -52,16 +52,26 @@ const fmtDay = (ts: any) => {
 
 const MOMENT_LABEL: Record<PhotoMoment, string> = { start: 'Start of day', work: 'Work day', end: 'End of day' };
 
-export const DriverHome: React.FC = () => {
+export interface DriverPreview {
+  businessId: string;
+  routeId: string;
+  driverName: string;
+  onExit: () => void;
+}
+
+export const DriverHome: React.FC<{ preview?: DriverPreview }> = ({ preview }) => {
   const { userProfile, logout } = useAuth();
   const { toasts, showToast, removeToast } = useToast();
   const [tab, setTab] = useState<Tab>('feed');
   const [route, setRoute] = useState<RouteTerritory | null>(null);
   const [routeLoading, setRouteLoading] = useState(true);
 
-  const businessId = userProfile?.businessId;
-  const routeId = userProfile?.routeIds?.[0];
-  const driverName = userProfile?.displayName || 'Driver';
+  // Preview mode (owner "view as driver") overrides the profile-derived values.
+  // When preview is absent these are byte-for-byte identical to the old behavior.
+  const isPreview = preview !== undefined;
+  const businessId = preview ? preview.businessId : userProfile?.businessId;
+  const routeId = preview ? preview.routeId : userProfile?.routeIds?.[0];
+  const driverName = preview ? preview.driverName : (userProfile?.displayName || 'Driver');
 
   useEffect(() => {
     if (!businessId || !routeId) {
@@ -120,25 +130,37 @@ export const DriverHome: React.FC = () => {
             </div>
           </div>
           <button
-            onClick={logout}
+            onClick={preview ? preview.onExit : logout}
             className="w-10 h-10 bg-white/10 rounded-xl flex items-center justify-center text-gray-300 active:scale-95"
-            aria-label="Sign out"
+            aria-label={isPreview ? 'Exit preview' : 'Sign out'}
           >
-            <i className="fas fa-sign-out-alt"></i>
+            <i className={`fas ${isPreview ? 'fa-times' : 'fa-sign-out-alt'}`}></i>
           </button>
         </div>
       </header>
 
+      {/* Preview banner — owner viewing as driver; writes disabled */}
+      {isPreview && (
+        <div className="bg-[#FFD700] text-black px-5 py-2.5">
+          <div className="max-w-md mx-auto flex items-center justify-center gap-2">
+            <i className="fas fa-eye text-xs"></i>
+            <span className="text-[10px] font-black uppercase tracking-[0.2em]">
+              Driver preview · {routeLoading ? '…' : route?.name || 'Route'} · writes disabled
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Content */}
       <main className="max-w-md mx-auto px-4 pt-4 pb-28">
         {tab === 'feed' && businessId && (
-          <FeedTab businessId={businessId} routeId={routeId} driverName={driverName} showToast={showToast} />
+          <FeedTab businessId={businessId} routeId={routeId} driverName={driverName} showToast={showToast} readOnly={isPreview} />
         )}
         {tab === 'eod' && businessId && (
-          <EodTab businessId={businessId} routeId={routeId} driverName={driverName} showToast={showToast} />
+          <EodTab businessId={businessId} routeId={routeId} driverName={driverName} showToast={showToast} readOnly={isPreview} />
         )}
         {tab === 'photos' && businessId && (
-          <PhotosTab businessId={businessId} routeId={routeId} driverName={driverName} showToast={showToast} />
+          <PhotosTab businessId={businessId} routeId={routeId} driverName={driverName} showToast={showToast} readOnly={isPreview} />
         )}
         {tab === 'score' && businessId && (
           <ScoreTab businessId={businessId} routeId={routeId} />
@@ -168,8 +190,8 @@ export const DriverHome: React.FC = () => {
 
 /* ================= FEED ================= */
 
-const FeedTab: React.FC<{ businessId: string; routeId: string; driverName: string; showToast: (m: string, t: 'success' | 'error') => void }> = ({
-  businessId, routeId, driverName, showToast
+const FeedTab: React.FC<{ businessId: string; routeId: string; driverName: string; showToast: (m: string, t: 'success' | 'error') => void; readOnly?: boolean }> = ({
+  businessId, routeId, driverName, showToast, readOnly
 }) => {
   const [items, setItems] = useState<any[]>([]);
   const [text, setText] = useState('');
@@ -202,7 +224,7 @@ const FeedTab: React.FC<{ businessId: string; routeId: string; driverName: strin
   }, []);
 
   const postUpdate = async () => {
-    if (!text.trim() || !currentUser) return;
+    if (readOnly || !text.trim() || !currentUser) return;
     setPosting(true);
     try {
       await addDoc(collection(db, `businesses/${businessId}/routes/${routeId}/updates`), {
@@ -229,15 +251,19 @@ const FeedTab: React.FC<{ businessId: string; routeId: string; driverName: strin
           value={text}
           onChange={(e) => setText(e.target.value)}
           placeholder="Order update, display win, anything…"
-          className="w-full p-3 bg-gray-50 rounded-2xl font-bold text-sm outline-none focus:ring-2 focus:ring-[#FFD700]"
+          disabled={readOnly}
+          className="w-full p-3 bg-gray-50 rounded-2xl font-bold text-sm outline-none focus:ring-2 focus:ring-[#FFD700] disabled:opacity-50"
         />
         <button
           onClick={postUpdate}
-          disabled={posting || !text.trim()}
+          disabled={posting || !text.trim() || readOnly}
           className="mt-2 w-full py-3 bg-black text-[#FFD700] rounded-2xl text-[10px] font-black uppercase tracking-widest active:scale-95 transition-all disabled:opacity-40"
         >
           {posting ? 'Posting…' : 'Post Update'}
         </button>
+        {readOnly && (
+          <p className="text-center text-[9px] font-black uppercase tracking-widest text-gray-400 mt-2">Disabled in preview</p>
+        )}
       </div>
 
       {items.map((item, i) => (
@@ -279,8 +305,8 @@ const FeedTab: React.FC<{ businessId: string; routeId: string; driverName: strin
 
 /* ================= END OF DAY ================= */
 
-const EodTab: React.FC<{ businessId: string; routeId: string; driverName: string; showToast: (m: string, t: 'success' | 'error') => void }> = ({
-  businessId, routeId, driverName, showToast
+const EodTab: React.FC<{ businessId: string; routeId: string; driverName: string; showToast: (m: string, t: 'success' | 'error') => void; readOnly?: boolean }> = ({
+  businessId, routeId, driverName, showToast, readOnly
 }) => {
   const dayId = toDayId(new Date());
   const [existing, setExisting] = useState<DriverEod | null>(null);
@@ -312,7 +338,7 @@ const EodTab: React.FC<{ businessId: string; routeId: string; driverName: string
   const complete = [f.piecesLeft, f.stalesPulled, f.stopsCompleted, f.endLocation, f.outlook].filter((v) => v.trim() !== '').length;
 
   const submit = async () => {
-    if (complete < 5 || !currentUser) return;
+    if (readOnly || complete < 5 || !currentUser) return;
     setSaving(true);
     try {
       await setDoc(doc(db, `businesses/${businessId}/routes/${routeId}/eod`, dayId), {
@@ -389,13 +415,16 @@ const EodTab: React.FC<{ businessId: string; routeId: string; driverName: string
         </div>
         <button
           onClick={submit}
-          disabled={complete < 5 || saving}
+          disabled={readOnly || complete < 5 || saving}
           className={`w-full py-4 rounded-2xl font-black uppercase tracking-widest text-sm transition-all active:scale-95 ${
             complete === 5 ? 'bg-black text-[#FFD700] shadow-xl' : 'bg-gray-100 text-gray-400'
           } disabled:opacity-70`}
         >
           {saving ? 'Submitting…' : complete === 5 ? (existing ? 'Update end of day' : 'Submit end of day') : 'Complete all required fields'}
         </button>
+        {readOnly && (
+          <p className="text-center text-[9px] font-black uppercase tracking-widest text-gray-400 mt-3">Disabled in preview</p>
+        )}
       </div>
     </div>
   );
@@ -403,8 +432,8 @@ const EodTab: React.FC<{ businessId: string; routeId: string; driverName: string
 
 /* ================= PHOTOS ================= */
 
-const PhotosTab: React.FC<{ businessId: string; routeId: string; driverName: string; showToast: (m: string, t: 'success' | 'error') => void }> = ({
-  businessId, routeId, driverName, showToast
+const PhotosTab: React.FC<{ businessId: string; routeId: string; driverName: string; showToast: (m: string, t: 'success' | 'error') => void; readOnly?: boolean }> = ({
+  businessId, routeId, driverName, showToast, readOnly
 }) => {
   const [moment, setMoment] = useState<PhotoMoment>('work');
   const [photos, setPhotos] = useState<RoutePhoto[]>([]);
@@ -426,7 +455,7 @@ const PhotosTab: React.FC<{ businessId: string; routeId: string; driverName: str
 
   const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || !currentUser) return;
+    if (readOnly || !file || !currentUser) return;
     setUploading(true);
     try {
       const dayId = toDayId(new Date());
@@ -482,15 +511,18 @@ const PhotosTab: React.FC<{ businessId: string; routeId: string; driverName: str
             </button>
           ))}
         </div>
-        <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={onFile} className="hidden" />
+        <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={onFile} className="hidden" disabled={readOnly} />
         <button
           onClick={() => fileRef.current?.click()}
-          disabled={uploading}
+          disabled={uploading || readOnly}
           className="w-full py-4 border-2 border-dashed border-gray-300 rounded-2xl font-black uppercase tracking-widest text-xs text-gray-600 active:scale-95 transition-all disabled:opacity-50"
         >
           <i className={`fas ${uploading ? 'fa-spinner fa-spin' : 'fa-camera'} mr-2`}></i>
           {uploading ? 'Uploading…' : 'Snap photo'}
         </button>
+        {readOnly && (
+          <p className="text-center text-[9px] font-black uppercase tracking-widest text-gray-400 mt-3">Disabled in preview</p>
+        )}
       </div>
 
       <div className="grid grid-cols-2 gap-3">
