@@ -1,5 +1,5 @@
 
-import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 import { Product, SmartSuggestion, Truck } from "../types";
 
 // Check if API key exists and is valid
@@ -7,49 +7,6 @@ const apiKey = import.meta.env.VITE_GEMINI_API_KEY || '';
 const isApiKeyValid = apiKey && apiKey !== 'PLACEHOLDER_API_KEY' && apiKey.length > 10;
 
 const ai = isApiKeyValid ? new GoogleGenAI({ apiKey }) : null;
-
-// Tool definitions for the AI Agent
-export const agentTools: FunctionDeclaration[] = [
-  {
-    name: 'update_order_quantity',
-    description: 'Updates the recommended or actual order quantity for a specific product.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        productId: { type: Type.STRING, description: 'The ID of the product to update.' },
-        newQuantity: { type: Type.NUMBER, description: 'The new order quantity.' },
-        reason: { type: Type.STRING, description: 'Brief reason for the manual override.' }
-      },
-      required: ['productId', 'newQuantity']
-    }
-  },
-  {
-    name: 'update_employee_status',
-    description: 'Updates a team member status or logs an event like sick day or vacation.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        employeeId: { type: Type.STRING, description: 'The name or ID of the employee (e.g. Andres, Adrian).' },
-        status: { type: Type.STRING, description: 'The new status (active, off, break, vacation, sick).' },
-        note: { type: Type.STRING, description: 'Note regarding the change (e.g., "Doctor appointment").' }
-      },
-      required: ['employeeId', 'status']
-    }
-  },
-  {
-    name: 'report_truck_issue',
-    description: 'Logs a new maintenance issue or updates the health status of a truck.',
-    parameters: {
-      type: Type.OBJECT,
-      properties: {
-        truckId: { type: Type.STRING, description: 'The plate or ID of the truck (e.g. GMC-06-01).' },
-        issue: { type: Type.STRING, description: 'Description of the problem.' },
-        healthStatus: { type: Type.STRING, description: 'New health status (good, warning, critical).' }
-      },
-      required: ['truckId', 'healthStatus']
-    }
-  }
-];
 
 export const getSmartOrderSuggestions = async (
   products: Product[],
@@ -112,49 +69,6 @@ export const getSmartOrderSuggestions = async (
       reason: "Historical average (AI unavailable)",
       impactLevel: 'low'
     }));
-  }
-};
-
-export const runAgentChat = async (message: string, history: any[]) => {
-  if (!ai || !isApiKeyValid) {
-    console.warn('⚠️ Gemini API key not configured.');
-    return "AI Agent is currently unavailable. Please configure VITE_GEMINI_API_KEY in your .env.local file to enable AI features.";
-  }
-
-  try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
-      contents: [
-        { role: 'user', parts: [{ text: `You are the TruckCEO AI Agent for "Mateos in Motion". You help Chris, Virgil, and Charlotte Mateo manage their bread distribution empire.
-          
-          BUSINESS CONTEXT:
-          - Executives: Chris Mateo, Virgil Mateo, Charlotte Mateo.
-          - Route Drivers: Andres, Adrian, Ronaldo, Alex.
-          - Fleet: 5 GMC 2006 (16ft) box trucks, 1 Isuzu 2014 (20ft) box truck.
-          - Territories: Yonkers (NY), Ossining (NY), Milford (CT), Stratford (CT), Ridgefield (CT), Norwalk (CT).
-          - Partners: Bimbo, Flowers.
-
-          CAPABILITIES:
-          - You can update orders, track employees, and manage fleet maintenance using available tools.
-          - You analyze weather patterns (e.g. heatwaves surging bun demand).
-          - You provide business insights and execute operational updates.
-          
-          Always be professional, highly capable, and proactive. If a user asks a question about the business, answer based on this context. If they ask to update something, use the provided tools.
-          
-          User message: ${message}` }] }
-      ],
-      config: {
-        tools: [{ functionDeclarations: agentTools }]
-      }
-    });
-
-    return {
-      text: response.text || "I've processed your request and updated the system.",
-      functionCalls: response.functionCalls
-    };
-  } catch (error) {
-    console.error("Agent Error:", error);
-    return { text: "I'm having trouble connecting to the Mateo business servers right now. Please try again." };
   }
 };
 
