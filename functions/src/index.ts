@@ -759,7 +759,9 @@ export const askAssistant = onRequest(
     cors: true,
     timeoutSeconds: 120,
     memory: "512MiB",
-    secrets: ["GEMINI_API_KEY", "META_MODEL_API_KEY", "OPENAI_API_KEY"],
+    // NOTE: META_MODEL_API_KEY dropped from deploy secrets — Meta was dropped as a
+    // provider backup (no key provisioned). Re-add here if a Meta key is ever created.
+    secrets: ["GEMINI_API_KEY", "OPENAI_API_KEY"],
   },
   async (req, res) => {
     if (req.method !== "POST") {
