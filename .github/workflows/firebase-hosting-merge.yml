@@ -35,4 +35,8 @@ jobs:
           workload_identity_provider: 'projects/419699908912/locations/global/workloadIdentityPools/github-actions-pool/providers/github-provider'
           service_account: 'github-actions-deployer@truck-ceo.iam.gserviceaccount.com'
 
-      - run: npx -y firebase-tools@latest deploy --only hosting --project truck-ceo
+      # NOTE: the first Cloud Functions deploy requires the deployer service account
+      # to hold these roles on the truck-ceo project (Chris approves once in the
+      # GCP console: IAM & Admin -> IAM):
+      #   roles/cloudfunctions.developer, roles/run.admin, roles/iam.serviceAccountUser
+      - run: npx -y firebase-tools@latest deploy --only hosting,functions --project truck-ceo
