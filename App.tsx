@@ -1,6 +1,8 @@
 
-import React, { useState } from 'react';
-import { View, SaleAlert, RouteTerritory, Store } from './types';
+import React, { useEffect, useState } from 'react';
+import { View, SaleAlert, RouteTerritory, Store, DriverEod } from './types';
+import { collection, getDocs, query, where } from 'firebase/firestore';
+import { db } from './services/firebaseConfig';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { DataProvider, useData } from './contexts/DataContext';
 import { AuthScreen } from './components/AuthScreen';
@@ -22,6 +24,7 @@ import { ConfirmDialog } from './components/ConfirmDialog';
 import { ToastContainer } from './components/ToastContainer';
 import { useToast } from './hooks/useToast';
 import { BUSINESS_NAME } from './constants';
+import { useRouteWeather, weatherCodeToCondition } from './services/useRouteWeather';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 
 const AppContent: React.FC = () => {
@@ -31,6 +34,8 @@ const AppContent: React.FC = () => {
   const [currentRoute, setCurrentRoute] = useState<RouteTerritory | null>(null);
   const [currentStore, setCurrentStore] = useState<Store | null>(null);
   const [navTruckId, setNavTruckId] = useState<string | null>(null);
+  const [previewRoute, setPreviewRoute] = useState<RouteTerritory | null>(null);
+  const [previewPickerOpen, setPreviewPickerOpen] = useState(false);
 
   const startNavigation = (truckId: string) => {
     setNavTruckId(truckId);
@@ -67,6 +72,23 @@ const AppContent: React.FC = () => {
     return <LoadingScreen message="Loading your data..." />;
   }
 
+  // Owner "preview as driver": fullscreen driver view for the chosen route.
+  // Writes are disabled inside DriverHome via the preview prop.
+  if (previewRoute) {
+    const previewDriver =
+      employees.find((e) => ((e as unknown as { assignedRoutes?: string[] }).assignedRoutes || []).includes(previewRoute.id))?.name || 'Driver';
+    return (
+      <DriverHome
+        preview={{
+          businessId: userProfile.businessId,
+          routeId: previewRoute.id,
+          driverName: previewDriver,
+          onExit: () => setPreviewRoute(null)
+        }}
+      />
+    );
+  }
+
   const renderContent = () => {
     switch (activeView) {
       case 'dashboard':
@@ -78,6 +100,7 @@ const AppContent: React.FC = () => {
             onRouteChange={setCurrentRoute}
             onStoreChange={setCurrentStore}
             fleetCount={trucks.length}
+            onPreviewAsDriver={() => setPreviewPickerOpen(true)}
           />
         );
       case 'ordering':
@@ -122,7 +145,7 @@ const AppContent: React.FC = () => {
       case 'routes_management':
         return <RoutesManagement />;
       default:
-        return <MainDashboard onWeatherClick={() => setActiveView('weather')} currentRoute={currentRoute} currentStore={currentStore} onRouteChange={setCurrentRoute} onStoreChange={setCurrentStore} fleetCount={trucks.length} />;
+        return <MainDashboard onWeatherClick={() => setActiveView('weather')} currentRoute={currentRoute} currentStore={currentStore} onRouteChange={setCurrentRoute} onStoreChange={setCurrentStore} fleetCount={trucks.length} onPreviewAsDriver={() => setPreviewPickerOpen(true)} />;
     }
   };
 
@@ -133,6 +156,16 @@ const AppContent: React.FC = () => {
       floating={activeView === 'dashboard' ? <TruckCeoAgent /> : null}
     >
       {renderContent()}
+      {previewPickerOpen && (
+        <DriverPreviewPicker
+          routes={routes}
+          onClose={() => setPreviewPickerOpen(false)}
+          onSelect={(r) => {
+            setPreviewPickerOpen(false);
+            setPreviewRoute(r);
+          }}
+        />
+      )}
     </Layout>
   );
 };
@@ -147,6 +180,13 @@ const App: React.FC = () => {
   );
 };
 
+// "2026-10-01" -> "Thu 10/1" (parsed as local date to avoid UTC day-shift)
+function shortDayLabel(iso: string): string {
+  const [y, m, d] = iso.split('-').map(Number);
+  const date = new Date(y, (m || 1) - 1, d || 1);
+  return `${date.toLocaleDateString('en-US', { weekday: 'short' })} ${date.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' })}`;
+}
+
 interface DashboardProps {
   onWeatherClick: () => void;
   currentRoute: RouteTerritory | null;
@@ -154,18 +194,149 @@ interface DashboardProps {
   onRouteChange: (r: RouteTerritory | null) => void;
   onStoreChange: (s: Store | null) => void;
   fleetCount: number;
+  onPreviewAsDriver: () => void;
 }
 
-const MainDashboard: React.FC<DashboardProps> = ({ onWeatherClick, currentRoute, currentStore, onRouteChange, onStoreChange, fleetCount }) => {
-  const chartData = [
-    { name: 'M', revenue: 4200 },
-    { name: 'T', revenue: 3800 },
-    { name: 'W', revenue: 5100 },
-    { name: 'T', revenue: 4600 },
-    { name: 'F', revenue: 5900 },
-    { name: 'S', revenue: 6200 },
-    { name: 'S', revenue: 3100 },
-  ];
+/* ---------- Owner dashboard: real driver-reported numbers ---------- */
+
+const toDayId = (d: Date): string =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+const mondayOfWeek = (): Date => {
+  const d = new Date();
+  const day = (d.getDay() + 6) % 7; // Monday = 0
+  d.setDate(d.getDate() - day);
+  d.setHours(0, 0, 0, 0);
+  return d;
+};
+
+const DAY_LABELS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+
+/** Drivers enter stops as free text ("14 / 16"). Take the leading number; null when unreadable. */
+const parseStops = (s: string): number | null => {
+  const m = /^\s*(\d+)/.exec(s || '');
+  return m ? parseInt(m[1], 10) : null;
+};
+
+interface ParsedEod {
+  date: string;
+  stops: number | null;
+  stales: number | null;
+}
+
+const MainDashboard: React.FC<DashboardProps> = ({ onWeatherClick, currentRoute, currentStore, onRouteChange, onStoreChange, fleetCount, onPreviewAsDriver }) => {
+  // Real live weather for the selected route territory (Open-Meteo, no key needed)
+  const { days, loading: weatherLoading } = useRouteWeather(currentRoute?.name ?? null);
+  const today = days.length > 0 ? days[0] : null;
+  const todayCondition = today ? weatherCodeToCondition(today.weatherCode) : null;
+  const todayIcon =
+    todayCondition === 'Rainy' ? 'fa-cloud-rain text-blue-400' :
+    todayCondition === 'Cloudy' ? 'fa-cloud text-gray-300' :
+    todayCondition === 'Snow' ? 'fa-snowflake text-blue-200' :
+    'fa-sun text-[#FFD700]';
+  const todayTemp = weatherLoading ? '—' : today ? `${today.tempMax}°F` : '—';
+
+  // Market Watch card derived from the REAL 7-day forecast — no invented numbers.
+  const next7 = days.slice(0, 7);
+  const hotDays = next7.filter((d) => d.tempMax >= 88);
+  const peakHeat = hotDays.length > 0 ? hotDays.reduce((a, b) => (b.tempMax > a.tempMax ? b : a)) : null;
+  const wettest = next7.length > 0 ? next7.reduce((a, b) => (b.precipProb > a.precipProb ? b : a)) : null;
+  const rainRisk = !peakHeat && wettest && wettest.precipProb >= 70 ? wettest : null;
+
+  // ---- This week's driver EOD reports (real Firestore data, never placeholders) ----
+  // Paths: businesses/{businessId}/routes to enumerate routes, then each
+  // route's eod subcollection: businesses/{businessId}/routes/{routeId}/eod,
+  // bounded to docs with date >= Monday (yyyy-mm-dd). Scoped to the selected
+  // route, or every route in the business when none is selected.
+  const { userProfile } = useAuth();
+  const businessId = userProfile?.businessId;
+  const routeId = currentRoute?.id ?? null;
+  const [weekLoading, setWeekLoading] = useState(true);
+  const [eods, setEods] = useState<ParsedEod[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      setWeekLoading(true);
+      setEods([]);
+      if (!businessId) {
+        if (!cancelled) setWeekLoading(false);
+        return;
+      }
+      try {
+        let routeIds: string[];
+        if (routeId) {
+          routeIds = [routeId];
+        } else {
+          const rSnap = await getDocs(collection(db, `businesses/${businessId}/routes`));
+          routeIds = rSnap.docs.map((docSnap) => docSnap.id);
+        }
+        const mondayId = toDayId(mondayOfWeek());
+        const snaps = await Promise.all(
+          routeIds.map((rid) =>
+            getDocs(query(collection(db, `businesses/${businessId}/routes/${rid}/eod`), where('date', '>=', mondayId)))
+          )
+        );
+        const parsed: ParsedEod[] = snaps.flatMap((s) =>
+          s.docs.map((docSnap) => {
+            const eod = docSnap.data() as DriverEod;
+            const stales = Number(eod.stalesPulled);
+            return {
+              date: eod.date,
+              stops: parseStops(eod.stopsCompleted),
+              stales: Number.isFinite(stales) ? stales : null,
+            };
+          })
+        );
+        if (!cancelled) {
+          setEods(parsed);
+          setWeekLoading(false);
+        }
+      } catch (err) {
+        console.error('Dashboard week stats failed:', err);
+        if (!cancelled) setWeekLoading(false);
+      }
+    };
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [businessId, routeId]);
+
+  const hasDocs = eods.length > 0;
+  const stopsOk = hasDocs && eods.every((p) => p.stops !== null);
+  const stalesOk = hasDocs && eods.every((p) => p.stales !== null);
+  const stopsSum = stopsOk ? eods.reduce((s, p) => s + (p.stops as number), 0) : null;
+  const stalesSum = stalesOk ? eods.reduce((s, p) => s + (p.stales as number), 0) : null;
+  const stopsUnparsed = eods.filter((p) => p.stops === null).length;
+  const daysReported = new Set(eods.map((p) => p.date)).size;
+
+  // Chart metric: prefer stops (headline ops number); fall back to stales when a
+  // driver typed something unparseable into the stops field. Labelled honestly.
+  const metric: 'stops' | 'stales' | null = !hasDocs ? null : stopsOk ? 'stops' : 'stales';
+  const metricLabel = metric === 'stops' ? 'Stops completed' : metric === 'stales' ? 'Stales pulled' : 'This week';
+
+  const monday = mondayOfWeek();
+  const todayIdx = (new Date().getDay() + 6) % 7; // slots run Monday .. today
+  const chartData: { name: string; value: number | null }[] = [];
+  for (let i = 0; i <= todayIdx; i++) {
+    const d = new Date(monday);
+    d.setDate(d.getDate() + i);
+    const dayDocs = eods.filter((p) => p.date === toDayId(d));
+    let value: number | null = null;
+    if (dayDocs.length > 0 && metric) {
+      const vals = dayDocs.map((p) => (metric === 'stops' ? p.stops : p.stales));
+      if (vals.every((v) => v !== null)) value = (vals as number[]).reduce((a, b) => a + b, 0);
+    }
+    chartData.push({ name: DAY_LABELS[i], value });
+  }
+  const chartVals = chartData.map((c) => c.value).filter((v): v is number => v !== null);
+  const hasChartValues = chartVals.length > 0;
+  const maxVal = hasChartValues ? Math.max(...chartVals) : 0;
+
+  // "…" while loading, "—" when there is no data, real number otherwise —
+  // never confuse "0 reported" with "no data".
+  const statVal = (v: number | null): string => (weekLoading ? '…' : v === null ? '—' : String(v));
 
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-500">
@@ -192,8 +363,8 @@ const MainDashboard: React.FC<DashboardProps> = ({ onWeatherClick, currentRoute,
             className="text-right hover:scale-105 active:scale-95 transition-transform bg-white/5 p-3 rounded-2xl border border-white/10"
           >
             <div className="text-[#FFD700] text-3xl font-black leading-none tracking-tighter flex items-center gap-2 justify-end">
-              <i className="fas fa-sun text-xl"></i>
-              <span>78°F</span>
+              <i className={`fas ${todayIcon} text-xl`}></i>
+              <span>{todayTemp}</span>
             </div>
             <span className="text-[8px] text-gray-500 font-black uppercase tracking-widest mt-1 block">Click for 14-Day Forecast</span>
           </button>
@@ -201,58 +372,138 @@ const MainDashboard: React.FC<DashboardProps> = ({ onWeatherClick, currentRoute,
         
         <div className="grid grid-cols-2 gap-4 relative z-10">
           <div className="bg-white/5 border border-white/10 rounded-[1.5rem] p-5">
-            <div className="text-2xl font-black text-[#FFD700]">$45.2k</div>
-            <div className="text-[9px] font-black uppercase tracking-widest text-gray-500 mt-1">Weekly Net</div>
+            <div className="text-2xl font-black text-[#FFD700]">{statVal(stopsSum)}</div>
+            <div className="text-[9px] font-black uppercase tracking-widest text-gray-500 mt-1">Stops completed</div>
+            {!weekLoading && stopsUnparsed > 0 && stopsSum !== null && (
+              <div className="text-[8px] font-bold uppercase tracking-widest text-gray-600 mt-1">
+                Partial — {stopsUnparsed} unreadable {stopsUnparsed === 1 ? 'entry' : 'entries'}
+              </div>
+            )}
+          </div>
+          <div className="bg-white/5 border border-white/10 rounded-[1.5rem] p-5">
+            <div className="text-2xl font-black text-[#FFD700]">{statVal(stalesSum)}</div>
+            <div className="text-[9px] font-black uppercase tracking-widest text-gray-500 mt-1">Stales pulled</div>
+          </div>
+          <div className="bg-white/5 border border-white/10 rounded-[1.5rem] p-5">
+            <div className="text-2xl font-black text-white">{weekLoading ? '…' : hasDocs ? String(daysReported) : '—'}</div>
+            <div className="text-[9px] font-black uppercase tracking-widest text-gray-500 mt-1">EODs submitted</div>
           </div>
           <div className="bg-white/5 border border-white/10 rounded-[1.5rem] p-5">
             <div className="text-2xl font-black text-white">{fleetCount}</div>
             <div className="text-[9px] font-black uppercase tracking-widest text-gray-500 mt-1">Fleet Active</div>
           </div>
         </div>
+        <p className="text-[8px] font-black uppercase tracking-[0.25em] text-gray-600 mt-4 relative z-10">
+          This week · Mon–Sun · driver-reported
+        </p>
       </section>
 
-      {/* Analytics Brief */}
+      {/* Driver preview entry point */}
+      <section>
+        <button
+          onClick={onPreviewAsDriver}
+          className="w-full py-5 bg-[#FFD700] text-black rounded-[2rem] font-black uppercase tracking-widest text-[11px] shadow-xl active:scale-95 transition-all flex items-center justify-center gap-3"
+        >
+          <i className="fas fa-eye text-lg"></i>
+          Preview as driver
+        </button>
+      </section>
+
+      {/* Analytics Brief — real driver-reported numbers, never placeholders */}
       <section className="bg-white rounded-[2.5rem] p-8 shadow-sm border border-gray-100">
         <div className="flex justify-between items-center mb-6 px-1">
-          <h3 className="font-black text-black text-[10px] uppercase tracking-[0.25em]">Revenue Velocity</h3>
+          <h3 className="font-black text-black text-[10px] uppercase tracking-[0.25em]">
+            {metric ? `${metricLabel} · this week` : 'This week'}
+          </h3>
           <i className="fas fa-chart-line text-[#FFD700]"></i>
         </div>
-        <div className="h-44 w-full">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={chartData}>
-              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f8fafc" />
-              <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 10, fontWeight: 'bold', fill: '#cbd5e1' }} />
-              <Tooltip cursor={{ fill: '#f8fafc' }} contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 20px 40px rgba(0,0,0,0.1)', fontWeight: 'bold', fontSize: '12px' }} />
-              <Bar dataKey="revenue" radius={[12, 12, 12, 12]} barSize={18}>
-                {chartData.map((entry, index) => (
-                  <Cell key={`cell-${index}`} fill={index === 5 ? '#000000' : '#f1f5f9'} />
-                ))}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
+        {weekLoading ? (
+          <div className="h-44 w-full flex items-center justify-center">
+            <p className="text-gray-300 text-[10px] font-black uppercase tracking-[0.25em]">Loading…</p>
+          </div>
+        ) : !hasChartValues ? (
+          <div className="h-44 w-full flex flex-col items-center justify-center text-center px-6 border-2 border-dashed border-gray-100 rounded-3xl">
+            <i className="fas fa-clipboard-list text-3xl text-gray-200 mb-3"></i>
+            <p className="text-gray-400 text-xs font-black uppercase tracking-widest leading-relaxed">
+              No driver data yet — numbers appear as drivers submit end-of-day reports.
+            </p>
+          </div>
+        ) : (
+          <>
+            <div className="h-44 w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f8fafc" />
+                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 10, fontWeight: 'bold', fill: '#cbd5e1' }} />
+                  <Tooltip
+                    cursor={{ fill: '#f8fafc' }}
+                    contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 20px 40px rgba(0,0,0,0.1)', fontWeight: 'bold', fontSize: '12px' }}
+                    formatter={(v) => [v, metricLabel]}
+                  />
+                  <Bar dataKey="value" radius={[12, 12, 12, 12]} barSize={18}>
+                    {chartData.map((entry, index) => (
+                      <Cell
+                        key={`cell-${index}`}
+                        fill={entry.value !== null && entry.value === maxVal && maxVal > 0 ? '#000000' : '#f1f5f9'}
+                      />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+            <p className="text-[9px] text-gray-400 font-bold uppercase tracking-widest mt-4 text-center">
+              {daysReported} of {todayIdx + 1} {todayIdx === 0 ? 'day' : 'days'} reported · blank days had no submission
+            </p>
+          </>
+        )}
       </section>
 
-      {/* Task List */}
-      <section className="space-y-3 pb-4">
-        <h3 className="font-black text-black text-[10px] uppercase tracking-[0.25em] px-2">Market Watch</h3>
-        
-        <div onClick={onWeatherClick} className="bg-black p-5 rounded-3xl flex items-center justify-between border-l-4 border-l-[#FFD700] shadow-2xl group active:scale-95 transition-transform cursor-pointer overflow-hidden relative">
-          <div className="absolute top-0 right-0 w-16 h-16 bg-[#FFD700]/5 rounded-full blur-xl"></div>
-          <div className="flex items-center gap-4 relative z-10">
-            <div className="w-12 h-12 bg-[#FFD700] rounded-2xl flex items-center justify-center text-black font-black text-lg">
-              <i className="fas fa-temperature-arrow-up"></i>
+      {/* Market Watch — driven by the REAL territory forecast; hidden when nothing notable */}
+      {(peakHeat || rainRisk) && (
+        <section className="space-y-3 pb-4">
+          <h3 className="font-black text-black text-[10px] uppercase tracking-[0.25em] px-2">Market Watch</h3>
+
+          {peakHeat && (
+            <div onClick={onWeatherClick} className="bg-black p-5 rounded-3xl flex items-center justify-between border-l-4 border-l-[#FFD700] shadow-2xl group active:scale-95 transition-transform cursor-pointer overflow-hidden relative">
+              <div className="absolute top-0 right-0 w-16 h-16 bg-[#FFD700]/5 rounded-full blur-xl"></div>
+              <div className="flex items-center gap-4 relative z-10">
+                <div className="w-12 h-12 bg-[#FFD700] rounded-2xl flex items-center justify-center text-black font-black text-lg">
+                  <i className="fas fa-temperature-arrow-up"></i>
+                </div>
+                <div>
+                  <h4 className="font-black text-xs text-white uppercase tracking-widest">Heatwave Incoming</h4>
+                  <p className="text-[10px] text-gray-500 font-bold uppercase tracking-tight mt-1">
+                    {peakHeat.tempMax}°F {shortDayLabel(peakHeat.date)} — buns demand surging.
+                  </p>
+                </div>
+              </div>
+              <button className="text-[#FFD700] p-2">
+                <i className="fas fa-chevron-right"></i>
+              </button>
             </div>
-            <div>
-              <h4 className="font-black text-xs text-white uppercase tracking-widest">Heatwave Prediction</h4>
-              <p className="text-[10px] text-gray-500 font-bold uppercase tracking-tight mt-1">Buns demand predicted +45% next week.</p>
+          )}
+
+          {rainRisk && (
+            <div onClick={onWeatherClick} className="bg-black p-5 rounded-3xl flex items-center justify-between border-l-4 border-l-blue-400 shadow-2xl group active:scale-95 transition-transform cursor-pointer overflow-hidden relative">
+              <div className="absolute top-0 right-0 w-16 h-16 bg-blue-400/5 rounded-full blur-xl"></div>
+              <div className="flex items-center gap-4 relative z-10">
+                <div className="w-12 h-12 bg-blue-400 rounded-2xl flex items-center justify-center text-black font-black text-lg">
+                  <i className="fas fa-cloud-rain"></i>
+                </div>
+                <div>
+                  <h4 className="font-black text-xs text-white uppercase tracking-widest">Rain Risk</h4>
+                  <p className="text-[10px] text-gray-500 font-bold uppercase tracking-tight mt-1">
+                    {rainRisk.precipProb}% rain {shortDayLabel(rainRisk.date)} — stales risk, watch returns.
+                  </p>
+                </div>
+              </div>
+              <button className="text-[#FFD700] p-2">
+                <i className="fas fa-chevron-right"></i>
+              </button>
             </div>
-          </div>
-          <button className="text-[#FFD700] p-2">
-            <i className="fas fa-chevron-right"></i>
-          </button>
-        </div>
-      </section>
+          )}
+        </section>
+      )}
     </div>
   );
 };
@@ -450,6 +701,56 @@ const PromoRequestManager: React.FC<{
     </div>
   );
 };
+
+const DriverPreviewPicker: React.FC<{
+  routes: RouteTerritory[];
+  onSelect: (r: RouteTerritory) => void;
+  onClose: () => void;
+}> = ({ routes, onSelect, onClose }) => (
+  <div
+    className="fixed inset-0 z-50 bg-black/70 flex items-end sm:items-center justify-center p-4"
+    onClick={onClose}
+  >
+    <div
+      className="bg-white w-full max-w-md rounded-[2rem] p-6 shadow-2xl"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="flex items-center justify-between mb-1">
+        <h3 className="font-black uppercase tracking-tight text-lg">Preview as driver</h3>
+        <button
+          onClick={onClose}
+          className="w-9 h-9 bg-gray-100 rounded-xl flex items-center justify-center active:scale-95"
+          aria-label="Close"
+        >
+          <i className="fas fa-times"></i>
+        </button>
+      </div>
+      <p className="text-[10px] text-gray-400 font-black uppercase tracking-widest mb-4">
+        Pick a route · writes disabled
+      </p>
+      <div className="space-y-2 max-h-80 overflow-y-auto">
+        {routes.map((r) => (
+          <button
+            key={r.id}
+            onClick={() => onSelect(r)}
+            className="w-full text-left bg-gray-50 hover:bg-black rounded-2xl p-4 flex items-center justify-between transition-all active:scale-95 group"
+          >
+            <div>
+              <div className="font-black uppercase tracking-widest text-xs group-hover:text-[#FFD700]">{r.name}</div>
+              <div className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mt-0.5">{r.id}</div>
+            </div>
+            <i className="fas fa-chevron-right text-gray-300 group-hover:text-[#FFD700]"></i>
+          </button>
+        ))}
+        {routes.length === 0 && (
+          <p className="text-center text-gray-400 text-xs font-black uppercase tracking-widest py-8">
+            No routes yet
+          </p>
+        )}
+      </div>
+    </div>
+  </div>
+);
 
 const LoadingScreen: React.FC<{ message: string }> = ({ message }) => (
   <div className="min-h-screen flex items-center justify-center bg-black">
