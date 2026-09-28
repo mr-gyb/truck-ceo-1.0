@@ -1,202 +1,397 @@
-
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
-import { runAgentChat, agentTools } from '../services/geminiService';
+import {
+  sendAssistantMessage,
+  loadLatestThread,
+  ThreadMessage,
+} from '../services/assistantService';
+import { useAuth } from '../contexts/AuthContext';
 
 interface Message {
   role: 'user' | 'agent';
   text: string;
-  type?: 'text' | 'action';
+  type?: 'text' | 'action' | 'escalation';
 }
 
-// Audio Utilities as per instructions
-function encode(bytes: Uint8Array) {
-  let binary = '';
-  const len = bytes.byteLength;
-  for (let i = 0; i < len; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
+// Web Speech API (voice INPUT only — transcript is sent as a normal message).
+// Chrome/Edge expose it as webkitSpeechRecognition; Firefox/Safari may not.
+type SpeechRecognitionCtor = new () => {
+  lang: string;
+  interimResults: boolean;
+  maxAlternatives: number;
+  onresult: ((event: any) => void) | null;
+  onerror: ((event: any) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+};
+
+function getSpeechRecognition(): SpeechRecognitionCtor | null {
+  const w = window as any;
+  return (w.SpeechRecognition || w.webkitSpeechRecognition || null) as SpeechRecognitionCtor | null;
 }
 
-function decode(base64: string) {
-  const binaryString = atob(base64);
-  const len = binaryString.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
-  }
-  return bytes;
+// --- Audio output (TTS) helpers -------------------------------------------
+// Browser speechSynthesis only; no keys, no deps.
+
+// Strip markdown/formatting so the voice speaks clean plain text.
+function stripMarkdown(text: string): string {
+  return text
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // [label](url) -> label
+    .replace(/[*_~`#>|]/g, '') // bold/ital/code/headers/quotes
+    .replace(/^\s*(?:[-•*]|\d+[.)])\s+/gm, '') // list markers at line starts
+    .replace(/\s*\n\s*/g, '. ') // line breaks become pauses
+    .replace(/\s{2,}/g, ' ')
+    .trim();
 }
 
-async function decodeAudioData(
-  data: Uint8Array,
-  ctx: AudioContext,
-  sampleRate: number,
-  numChannels: number,
-): Promise<AudioBuffer> {
-  const dataInt16 = new Int16Array(data.buffer);
-  const frameCount = dataInt16.length / numChannels;
-  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
+// Keep speech reasonable: cap at ~900 chars, cut at a sentence boundary.
+function truncateForSpeech(text: string, max = 900): string {
+  if (text.length <= max) return text;
+  const cut = text.lastIndexOf('. ', max);
+  return (cut > max * 0.4 ? text.slice(0, cut + 1) : text.slice(0, max)).trim();
+}
 
-  for (let channel = 0; channel < numChannels; channel++) {
-    const channelData = buffer.getChannelData(channel);
-    for (let i = 0; i < frameCount; i++) {
-      channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
-    }
+const SPANISH_WORDS = new Set([
+  'el', 'la', 'los', 'las', 'un', 'una', 'de', 'del', 'en', 'con', 'por', 'para',
+  'gracias', 'favor', 'está', 'estan', 'están', 'hola', 'aquí', 'aqui', 'qué',
+  'cómo', 'estás', 'bien', 'ruta', 'rutas', 'conductor', 'camión', 'camion',
+  'tienda', 'tiendas', 'ventas', 'semana', 'hoy', 'mañana', 'manana', 'ayer',
+  'puedo', 'tiene', 'tienen', 'hay', 'muy', 'más', 'pero', 'cuando', 'donde',
+  'porque', 'usted', 'ustedes', 'nosotros', 'también', 'tambien', 'hasta',
+  'sobre', 'entre', 'este', 'esta', 'estos', 'estas', 'ese', 'esa', 'mi', 'mis',
+  'tu', 'tus', 'su', 'sus', 'buenos', 'buenas', 'días', 'dias', 'noches',
+  'tardes', 'adiós', 'adios', 'saludos', 'atentamente',
+]);
+
+// Detect the reply language: Spanish markers (accents/¿¡ or 2+ Spanish words)
+// -> 'es-US', otherwise 'en-US'.
+function detectReplyLang(text: string): 'es-US' | 'en-US' {
+  const t = text.toLowerCase();
+  if (/[áéíóúñü¿¡]/.test(t)) return 'es-US';
+  const words = t.match(/[a-záéíóúñü]+/g) ?? [];
+  let hits = 0;
+  for (const w of words) {
+    if (SPANISH_WORDS.has(w) && ++hits >= 2) return 'es-US';
   }
-  return buffer;
+  return 'en-US';
 }
 
 export const TruckCeoAgent: React.FC = () => {
+  const { userProfile } = useAuth();
+  const role = userProfile?.role;
+  const businessId = userProfile?.businessId;
+
   const [isOpen, setIsOpen] = useState(false);
-  const [isLiveMode, setIsLiveMode] = useState(false);
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<Message[]>([
     { role: 'agent', text: "Welcome back, Mateo. I'm your TruckCEO Command AI. How can I assist with your routes or team today?" }
   ]);
   const [isTyping, setIsTyping] = useState(false);
-  
+  const [threadId, setThreadId] = useState<string | undefined>(undefined);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const voiceSupported = getSpeechRecognition() !== null;
+
+  // Audio output (TTS) via speechSynthesis + bilingual voice state.
+  const speechSupported = typeof window !== 'undefined' && 'speechSynthesis' in window;
+  const [speakerOn, setSpeakerOnState] = useState<boolean>(() => {
+    try {
+      const v = localStorage.getItem('truckceo-agent-speaker');
+      return v === null ? true : v === '1'; // default ON
+    } catch {
+      return true;
+    }
+  });
+  const [lang, setLangState] = useState<'en-US' | 'es-US'>(() => {
+    try {
+      return localStorage.getItem('truckceo-agent-lang') === 'es-US' ? 'es-US' : 'en-US';
+    } catch {
+      return 'en-US';
+    }
+  });
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const hasInteractedRef = useRef(false);
+
   const scrollRef = useRef<HTMLDivElement>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const sessionRef = useRef<any>(null);
-  const nextStartTimeRef = useRef(0);
-  const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
+  const recognitionRef = useRef<InstanceType<SpeechRecognitionCtor> | null>(null);
 
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages, isTyping, isLiveMode]);
+  }, [messages, isTyping]);
 
-  const handleSendText = async () => {
-    if (!input.trim()) return;
-    const userMsg = input;
+  const mapThreadMessages = useCallback((threadMessages: ThreadMessage[]): Message[] => {
+    const out: Message[] = [];
+    for (const m of threadMessages) {
+      if (m.role === 'user') {
+        out.push({ role: 'user', text: m.text });
+      } else {
+        for (const tc of m.toolCalls ?? []) {
+          out.push({ role: 'agent', text: tc.result, type: 'action' });
+        }
+        if (m.escalated) {
+          out.push({
+            role: 'agent',
+            text: 'Handed to GYBs — the reply will land here.',
+            type: 'escalation',
+          });
+        }
+        if (m.text) out.push({ role: 'agent', text: m.text });
+      }
+    }
+    return out;
+  }, []);
+
+  const refreshThread = useCallback(async () => {
+    if (!businessId) return;
+    try {
+      const latest = await loadLatestThread(businessId);
+      if (latest) {
+        setThreadId(latest.threadId);
+        const mapped = mapThreadMessages(latest.messages);
+        if (mapped.length > 0) setMessages(mapped);
+      }
+    } catch (err) {
+      console.error('Failed to load assistant thread:', err);
+    } finally {
+      setHistoryLoaded(true);
+    }
+  }, [businessId, mapThreadMessages]);
+
+  // Load thread history the first time the widget opens (per business).
+  useEffect(() => {
+    if (isOpen && !historyLoaded) {
+      void refreshThread();
+    }
+  }, [isOpen, historyLoaded, refreshThread]);
+
+  // Reset history when the signed-in business changes.
+  useEffect(() => {
+    setHistoryLoaded(false);
+    setThreadId(undefined);
+  }, [businessId]);
+
+  // Autoplay policy: speechSynthesis needs a prior user gesture on the page.
+  useEffect(() => {
+    const mark = () => {
+      hasInteractedRef.current = true;
+    };
+    window.addEventListener('pointerdown', mark);
+    window.addEventListener('keydown', mark);
+    return () => {
+      window.removeEventListener('pointerdown', mark);
+      window.removeEventListener('keydown', mark);
+    };
+  }, []);
+
+  // Voices load asynchronously — refresh when the browser announces them.
+  useEffect(() => {
+    if (!speechSupported) return;
+    const load = () => setVoices(window.speechSynthesis.getVoices());
+    load();
+    window.speechSynthesis.onvoiceschanged = load;
+    return () => {
+      window.speechSynthesis.onvoiceschanged = null;
+    };
+  }, [speechSupported]);
+
+  const stopSpeaking = useCallback(() => {
+    if (speechSupported) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        /* noop */
+      }
+    }
+    setIsSpeaking(false);
+  }, [speechSupported]);
+
+  // Pick a voice matching the detected reply language, falling back to the
+  // user's language toggle, then the browser default.
+  const pickVoice = useCallback(
+    (detectedLang: 'es-US' | 'en-US'): SpeechSynthesisVoice | null => {
+      for (const l of [detectedLang, lang]) {
+        const prefix = l.split('-')[0].toLowerCase();
+        const v = voices.find(v => (v.lang || '').toLowerCase().startsWith(prefix));
+        if (v) return v;
+      }
+      return voices.find(v => v.default) ?? voices[0] ?? null;
+    },
+    [voices, lang]
+  );
+
+  const speak = useCallback(
+    (rawText: string) => {
+      if (!speakerOn || !speechSupported || !hasInteractedRef.current) return;
+      const clean = truncateForSpeech(stripMarkdown(rawText));
+      if (!clean) return;
+      const synth = window.speechSynthesis;
+      try {
+        synth.cancel(); // never queue — latest reply wins
+      } catch {
+        /* noop */
+      }
+      const detected = detectReplyLang(rawText);
+      const utter = new SpeechSynthesisUtterance(clean);
+      utter.lang = detected;
+      const voice = pickVoice(detected);
+      if (voice) utter.voice = voice;
+      utter.rate = 1;
+      utter.pitch = 1;
+      utter.onstart = () => setIsSpeaking(true);
+      const done = () => setIsSpeaking(false);
+      utter.onend = done;
+      utter.onerror = done;
+      try {
+        synth.speak(utter);
+      } catch {
+        setIsSpeaking(false);
+      }
+    },
+    [speakerOn, speechSupported, pickVoice]
+  );
+
+  const toggleSpeaker = () => {
+    stopSpeaking(); // tapping while speaking stops it; turning off stops too
+    setSpeakerOnState(prev => {
+      const next = !prev;
+      try {
+        localStorage.setItem('truckceo-agent-speaker', next ? '1' : '0');
+      } catch {
+        /* noop */
+      }
+      return next;
+    });
+  };
+
+  // ES/EN toggle: drives both voice-input recognition lang and TTS preference.
+  const setLang = (l: 'en-US' | 'es-US') => {
+    setLangState(l);
+    try {
+      localStorage.setItem('truckceo-agent-lang', l);
+    } catch {
+      /* noop */
+    }
+  };
+
+  const handleSendText = async (overrideText?: string) => {
+    const userMsg = (overrideText ?? input).trim();
+    if (!userMsg || isTyping) return;
     setInput('');
+    stopSpeaking(); // a new message silences any in-flight reply
     setMessages(prev => [...prev, { role: 'user', text: userMsg }]);
     setIsTyping(true);
 
-    const response = await runAgentChat(userMsg, []);
-    setIsTyping(false);
-    
-    if (response.functionCalls) {
-      for (const fc of response.functionCalls) {
-        setMessages(prev => [...prev, { 
-          role: 'agent', 
-          text: `SYSTEM: Executing ${fc.name.replace(/_/g, ' ')}...`, 
-          type: 'action' 
-        }]);
-      }
-    }
-    setMessages(prev => [...prev, { role: 'agent', text: response.text }]);
-  };
-
-  const startLiveSession = async () => {
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || '' });
-      const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-      audioContextRef.current = outputCtx;
+      const response = await sendAssistantMessage(userMsg, threadId);
+      setThreadId(response.threadId || threadId);
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      
-      const sessionPromise = ai.live.connect({
-        model: 'gemini-2.5-flash-native-audio-preview-12-2025',
-        callbacks: {
-          onopen: () => {
-            const source = inputCtx.createMediaStreamSource(stream);
-            const scriptProcessor = inputCtx.createScriptProcessor(4096, 1, 1);
-            scriptProcessor.onaudioprocess = (e) => {
-              const inputData = e.inputBuffer.getChannelData(0);
-              const l = inputData.length;
-              const int16 = new Int16Array(l);
-              for (let i = 0; i < l; i++) int16[i] = inputData[i] * 32768;
-              const pcmBlob = {
-                data: encode(new Uint8Array(int16.buffer)),
-                mimeType: 'audio/pcm;rate=16000',
-              };
-              sessionPromise.then(session => session.sendRealtimeInput({ media: pcmBlob }));
-            };
-            source.connect(scriptProcessor);
-            scriptProcessor.connect(inputCtx.destination);
-            setIsLiveMode(true);
-          },
-          onmessage: async (message: LiveServerMessage) => {
-            // Handle Audio Output
-            const base64Audio = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
-            if (base64Audio) {
-              const ctx = audioContextRef.current!;
-              nextStartTimeRef.current = Math.max(nextStartTimeRef.current, ctx.currentTime);
-              const audioBuffer = await decodeAudioData(decode(base64Audio), ctx, 24000, 1);
-              const source = ctx.createBufferSource();
-              source.buffer = audioBuffer;
-              source.connect(ctx.destination);
-              source.start(nextStartTimeRef.current);
-              nextStartTimeRef.current += audioBuffer.duration;
-              sourcesRef.current.add(source);
-              source.onended = () => sourcesRef.current.delete(source);
-            }
+      const next: Message[] = [];
+      for (const tc of response.toolCalls) {
+        next.push({ role: 'agent', text: tc.result, type: 'action' });
+      }
+      if (response.escalated) {
+        next.push({
+          role: 'agent',
+          text: 'Handed to GYBs — the reply will land here.',
+          type: 'escalation',
+        });
+      }
+      if (response.text) {
+        next.push({ role: 'agent', text: response.text });
+      }
+      setMessages(prev => [...prev, ...next]);
 
-            // Handle Transcriptions
-            if (message.serverContent?.outputTranscription) {
-              const txt = message.serverContent.outputTranscription.text;
-              setMessages(prev => {
-                const last = prev[prev.length - 1];
-                if (last?.role === 'agent' && last?.type !== 'action') {
-                   return [...prev.slice(0, -1), { ...last, text: last.text + txt }];
-                }
-                return [...prev, { role: 'agent', text: txt }];
-              });
-            }
-            if (message.serverContent?.inputTranscription) {
-               const txt = message.serverContent.inputTranscription.text;
-               setMessages(prev => {
-                const last = prev[prev.length - 1];
-                if (last?.role === 'user') {
-                   return [...prev.slice(0, -1), { ...last, text: last.text + txt }];
-                }
-                return [...prev, { role: 'user', text: txt }];
-              });
-            }
+      // Speak the reply aloud (respects speaker toggle + autoplay policy).
+      const speakable = response.text
+        ? response.text
+        : response.escalated
+        ? 'Handed to GYBs — the reply will land here.'
+        : '';
+      if (speakable) speak(speakable);
 
-            if (message.serverContent?.interrupted) {
-              sourcesRef.current.forEach(s => s.stop());
-              sourcesRef.current.clear();
-              nextStartTimeRef.current = 0;
-            }
-          },
-          onclose: () => setIsLiveMode(false),
-          onerror: () => setIsLiveMode(false),
-        },
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } } },
-          systemInstruction: 'You are the TruckCEO AI. You help manage the Mateo bread route business. Provide sharp, quick business updates via voice.',
-          outputAudioTranscription: {},
-          inputAudioTranscription: {},
-          tools: [{ functionDeclarations: agentTools }]
-        },
-      });
-
-      sessionRef.current = await sessionPromise;
+      // Re-sync with the server-written thread so confirmations and any
+      // backend-added messages stay consistent.
+      await refreshThread();
     } catch (err) {
-      console.error("Live API Error:", err);
-      setIsLiveMode(false);
+      console.error('Assistant error:', err);
+      const fallback = "I couldn't reach the assistant. Check your connection and try again.";
+      setMessages(prev => [
+        ...prev,
+        { role: 'agent', text: fallback },
+      ]);
+      speak(fallback);
+    } finally {
+      setIsTyping(false);
     }
   };
 
-  const stopLiveSession = () => {
-    if (sessionRef.current) {
-      sessionRef.current.close();
-      sessionRef.current = null;
+  const toggleVoiceInput = () => {
+    const SR = getSpeechRecognition();
+    if (!SR) return;
+
+    if (isListening && recognitionRef.current) {
+      recognitionRef.current.stop();
+      return;
     }
-    setIsLiveMode(false);
+
+    const recognition = new SR();
+    recognition.lang = lang; // follows the ES/EN toggle
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    recognitionRef.current = recognition;
+
+    recognition.onresult = (event: any) => {
+      const transcript: string =
+        event.results?.[0]?.[0]?.transcript ?? '';
+      if (transcript.trim()) {
+        void handleSendText(transcript.trim());
+      }
+    };
+    recognition.onerror = () => setIsListening(false);
+    recognition.onend = () => {
+      setIsListening(false);
+      recognitionRef.current = null;
+    };
+
+    try {
+      recognition.start();
+      setIsListening(true);
+    } catch {
+      setIsListening(false);
+    }
   };
+
+  useEffect(() => {
+    return () => {
+      try {
+        recognitionRef.current?.stop();
+      } catch {
+        /* noop */
+      }
+      stopSpeaking(); // cancel any in-flight speech on unmount
+    };
+  }, [stopSpeaking]);
+
+  const placeholder =
+    role === 'team_member'
+      ? 'Ask about your route, score, or log a note…'
+      : 'Ask about routes, team, or fleet…';
+
+  const hintText =
+    role === 'team_member'
+      ? '"My stale rate this week" • "Log a bakery short" • "My driver score"'
+      : '"Update Yonkers Bun Count" • "Is Adrian active?" • "Fleet status report"';
 
   return (
     <>
-      <button 
-        onClick={() => setIsOpen(!isOpen)}
+      <button
+        onClick={() => {
+          if (isOpen) stopSpeaking();
+          setIsOpen(!isOpen);
+        }}
         className="absolute bottom-24 right-6 w-16 h-16 bg-[#FFD700] text-black rounded-full shadow-[0_10px_30px_rgba(255,215,0,0.3)] flex items-center justify-center z-[100] transition-all hover:scale-110 active:scale-95 group border-4 border-black/5"
       >
         <i className={`fas ${isOpen ? 'fa-times' : 'fa-robot'} text-2xl group-hover:rotate-12 transition-transform`}></i>
@@ -210,29 +405,44 @@ export const TruckCeoAgent: React.FC = () => {
           <div className="bg-black p-6 flex items-center justify-between">
             <div className="flex items-center gap-4">
               <div className="w-12 h-12 bg-[#FFD700] rounded-2xl flex items-center justify-center shadow-lg">
-                <i className={`fas ${isLiveMode ? 'fa-volume-high animate-pulse' : 'fa-microchip'} text-black text-xl`}></i>
+                <i className="fas fa-microchip text-black text-xl"></i>
               </div>
               <div>
                 <h3 className="text-white font-black text-[11px] uppercase tracking-[0.2em]">Mateo Intel Agent</h3>
                 <div className="flex items-center gap-2 mt-1">
-                  <div className={`w-2 h-2 rounded-full ${isLiveMode ? 'bg-green-500 animate-pulse' : 'bg-gray-600'}`}></div>
-                  <span className="text-[9px] text-gray-500 font-black uppercase tracking-widest">{isLiveMode ? 'Live Audio Active' : 'System Ready'}</span>
+                  <div className="w-2 h-2 rounded-full bg-gray-600"></div>
+                  <span className="text-[9px] text-gray-500 font-black uppercase tracking-widest">System Ready</span>
                 </div>
               </div>
             </div>
-            <button onClick={() => setIsOpen(false)} className="text-gray-500 hover:text-white transition-colors">
-              <i className="fas fa-chevron-down"></i>
-            </button>
+            <div className="flex items-center gap-2">
+              {speechSupported && (
+                <button
+                  onClick={toggleSpeaker}
+                  aria-label={speakerOn ? 'Mute assistant voice' : 'Unmute assistant voice'}
+                  className={`w-9 h-9 rounded-full flex items-center justify-center transition-all active:scale-90 ${
+                    speakerOn ? 'bg-[#FFD700] text-black' : 'bg-gray-800 text-gray-500'
+                  }`}
+                >
+                  <i className={`fas ${speakerOn ? 'fa-volume-up' : 'fa-volume-mute'} text-sm ${isSpeaking ? 'animate-pulse' : ''}`}></i>
+                </button>
+              )}
+              <button onClick={() => { stopSpeaking(); setIsOpen(false); }} className="text-gray-500 hover:text-white transition-colors">
+                <i className="fas fa-chevron-down"></i>
+              </button>
+            </div>
           </div>
 
           <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 space-y-4 no-scrollbar bg-white">
             {messages.map((msg, i) => (
               <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                 <div className={`max-w-[85%] p-4 rounded-[1.8rem] text-[13px] ${
-                  msg.role === 'user' 
-                    ? 'bg-black text-[#FFD700] rounded-br-md font-black' 
+                  msg.role === 'user'
+                    ? 'bg-black text-[#FFD700] rounded-br-md font-black'
                     : msg.type === 'action'
                     ? 'bg-[#FFD700]/10 border border-[#FFD700]/20 text-black text-[10px] font-black italic rounded-bl-md uppercase'
+                    : msg.type === 'escalation'
+                    ? 'bg-black text-[#FFD700] border-2 border-[#FFD700] rounded-bl-md font-black text-[11px] uppercase tracking-widest'
                     : 'bg-gray-50 text-gray-800 rounded-bl-md font-bold'
                 }`}>
                   {msg.text}
@@ -251,49 +461,59 @@ export const TruckCeoAgent: React.FC = () => {
           </div>
 
           <div className="p-6 border-t border-gray-50 bg-white">
-            {isLiveMode ? (
-              <div className="flex flex-col items-center gap-4 py-2">
-                <div className="flex gap-1 items-center h-8">
-                  {[...Array(8)].map((_, i) => (
-                    <div key={i} className="w-1.5 bg-[#FFD700] rounded-full animate-[bounce_1s_infinite]" style={{ animationDelay: `${i * 0.1}s`, height: `${Math.random() * 100}%` }}></div>
-                  ))}
-                </div>
-                <button 
-                  onClick={stopLiveSession}
-                  className="w-full py-4 bg-red-500 text-white rounded-2xl font-black uppercase tracking-[0.2em] text-[10px] shadow-xl shadow-red-500/20 active:scale-95 transition-all"
+            <div className="flex flex-col gap-3">
+              <div className="flex items-center gap-2 bg-gray-50 p-2 rounded-[2.5rem] border border-gray-100 focus-within:border-black transition-all">
+                <input
+                  type="text"
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleSendText()}
+                  placeholder={placeholder}
+                  className="flex-1 bg-transparent border-none outline-none px-5 py-3 text-sm font-bold text-black placeholder:text-gray-300"
+                />
+                <button
+                  onClick={() => handleSendText()}
+                  disabled={!input.trim()}
+                  className="w-12 h-12 bg-black text-[#FFD700] rounded-full flex items-center justify-center shadow-lg active:scale-90 disabled:opacity-20 transition-all"
                 >
-                  <i className="fas fa-microphone-slash mr-2"></i> End Voice Mode
+                  <i className="fas fa-paper-plane text-sm"></i>
                 </button>
               </div>
-            ) : (
-              <div className="flex flex-col gap-3">
-                <div className="flex items-center gap-2 bg-gray-50 p-2 rounded-[2.5rem] border border-gray-100 focus-within:border-black transition-all">
-                  <input 
-                    type="text" 
-                    value={input}
-                    onChange={(e) => setInput(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleSendText()}
-                    placeholder="Ask about orders, team, or fleet..."
-                    className="flex-1 bg-transparent border-none outline-none px-5 py-3 text-sm font-bold text-black placeholder:text-gray-300"
-                  />
-                  <button 
-                    onClick={handleSendText}
-                    disabled={!input.trim()}
-                    className="w-12 h-12 bg-black text-[#FFD700] rounded-full flex items-center justify-center shadow-lg active:scale-90 disabled:opacity-20 transition-all"
-                  >
-                    <i className="fas fa-paper-plane text-sm"></i>
+              {voiceSupported ? (
+                <div className="flex items-center gap-2">
+                  <div className="flex bg-gray-100 rounded-full p-1 border border-gray-200 shrink-0" role="group" aria-label="Voice language">
+                    {(['en-US', 'es-US'] as const).map(l => (
+                      <button
+                        key={l}
+                        onClick={() => setLang(l)}
+                        className={`px-3 py-2 rounded-full text-[10px] font-black uppercase tracking-widest transition-all active:scale-95 ${
+                          lang === l ? 'bg-black text-[#FFD700] shadow' : 'text-gray-400'
+                        }`}
+                      >
+                        {l === 'en-US' ? 'EN' : 'ES'}
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    onClick={toggleVoiceInput}
+                    className={`flex-1 py-4 rounded-2xl font-black uppercase tracking-[0.2em] text-[10px] shadow-xl active:scale-95 transition-all flex items-center justify-center gap-2 ${
+                    isListening
+                      ? 'bg-red-500 text-white shadow-red-500/20'
+                      : 'bg-[#FFD700] text-black shadow-[#FFD700]/20'
+                  }`}
+                >
+                  <i className={`fas ${isListening ? 'fa-stop' : 'fa-microphone'}`}></i>
+                  {isListening ? 'Listening… tap to stop' : 'Voice input — tap & speak'}
                   </button>
                 </div>
-                <button 
-                  onClick={startLiveSession}
-                  className="w-full py-4 bg-[#FFD700] text-black rounded-2xl font-black uppercase tracking-[0.2em] text-[10px] shadow-xl shadow-[#FFD700]/20 active:scale-95 transition-all flex items-center justify-center gap-2"
-                >
-                  <i className="fas fa-microphone"></i> Start Voice Interaction
-                </button>
-              </div>
-            )}
+              ) : (
+                <p className="text-[9px] text-center text-gray-400 font-bold uppercase tracking-widest">
+                  Voice input not supported in this browser
+                </p>
+              )}
+            </div>
             <p className="text-[8px] text-center text-gray-300 font-black uppercase tracking-widest mt-4">
-              "Update Yonkers Bun Count" • "Is Adrian active?" • "Fleet status report"
+              {hintText}
             </p>
           </div>
         </div>
