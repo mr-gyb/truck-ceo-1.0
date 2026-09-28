@@ -46,9 +46,40 @@ service cloud.firestore {
     // Businesses: full tenant isolation. You can only touch your own business.
     match /businesses/{bid} {
       allow read, write: if isAuthed() && myBusiness() == bid;
-      match /{subcollection=**} {
-        allow read, write: if isAuthed() && myBusiness() == bid;
+
+      // AI assistant threads: tenant members can READ (chat history);
+      // only the backend function (Admin SDK) writes. Carved out of the
+      // wildcard below so clients can never write threads or messages.
+      match /assistantThreads/{tid} {
+        allow read: if isAuthed() && myBusiness() == bid;
+        match /messages/{mid} {
+          allow read: if isAuthed() && myBusiness() == bid;
+        }
       }
+
+      match /{subcollection=**} {
+        allow read, write: if isAuthed() && myBusiness() == bid
+          && subcollection[0] != 'assistantThreads';
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // AI assistant collections (added 2026-09-28). These ride along with
+    // the already-pending console paste of this file (owed since 2026-09-26).
+    //
+    // agentInbox: a business owner can read their own business's items.
+    // Only the backend function (Admin SDK) writes. Drivers see the
+    // reply via their readable assistant thread, not the inbox itself.
+    match /agentInbox/{id} {
+      allow read: if isAuthed()
+        && myProfile().role == 'business_owner'
+        && resource.data.businessId == myBusiness();
+    }
+
+    // assistant_config (the brain file): function-only via Admin SDK.
+    // No client access at all.
+    match /assistant_config/{doc} {
+      allow read, write: if false;
     }
   }
 }
