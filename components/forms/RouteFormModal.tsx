@@ -17,6 +17,7 @@ export const RouteFormModal: React.FC<RouteFormModalProps> = ({
 }) => {
   const [formData, setFormData] = useState({
     name: '',
+    routeNumber: '',
     stores: []
   });
 
@@ -27,11 +28,13 @@ export const RouteFormModal: React.FC<RouteFormModalProps> = ({
     if (route) {
       setFormData({
         name: route.name,
+        routeNumber: route.routeNumber || '',
         stores: route.stores || []
       });
     } else {
       setFormData({
         name: '',
+        routeNumber: '',
         stores: []
       });
     }
@@ -56,7 +59,11 @@ export const RouteFormModal: React.FC<RouteFormModalProps> = ({
 
     setSubmitting(true);
     try {
-      await onSubmit(formData);
+      await onSubmit({
+        name: formData.name.trim(),
+        routeNumber: formData.routeNumber.trim() || undefined,
+        stores: formData.stores
+      });
       onClose();
     } catch (error) {
       console.error('Error submitting route:', error);
@@ -89,6 +96,23 @@ export const RouteFormModal: React.FC<RouteFormModalProps> = ({
           {errors.name && (
             <p className="text-red-600 text-xs font-bold mt-2">{errors.name}</p>
           )}
+        </div>
+
+        {/* Route Number (optional — links the route to bakery data + the AI assistant) */}
+        <div>
+          <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">
+            Route Number <span className="text-gray-300 normal-case">(optional)</span>
+          </label>
+          <input
+            type="text"
+            value={formData.routeNumber}
+            onChange={(e) => setFormData({ ...formData, routeNumber: e.target.value })}
+            className="w-full p-4 bg-gray-50 border-2 border-gray-200 rounded-2xl focus:ring-2 focus:ring-[#FFD700] focus:border-[#FFD700] outline-none font-bold"
+            placeholder="e.g., 2080"
+          />
+          <p className="text-[10px] text-gray-400 font-bold mt-2">
+            Your bakery route number — lets the AI assistant match this route to live data.
+          </p>
         </div>
 
         <div className="bg-blue-50 border-2 border-blue-100 rounded-2xl p-4">
