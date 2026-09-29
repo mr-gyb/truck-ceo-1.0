@@ -50,4 +50,4 @@ jobs:
       # even if the functions step exits non-zero on its cosmetic Artifact Registry
       # cleanup-policy step (the function itself deploys fine before that step).
       - run: npx -y firebase-tools@latest deploy --only hosting --project truck-ceo
-      - run: npx -y firebase-tools@latest deploy --only functions --project truck-ceo
+      - run: npx -y firebase-tools@latest deploy --only functions --force --project truck-ceo
