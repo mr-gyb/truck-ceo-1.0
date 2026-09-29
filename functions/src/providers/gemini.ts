@@ -36,6 +36,32 @@ function toFunctionDeclarations(tools: NeutralTool[]): FunctionDeclaration[] {
   }));
 }
 
+/**
+ * Retry transient Gemini API errors (429 rate-limit, 503/500 overload) with
+ * exponential backoff. Model-demand spikes are usually brief; without this a
+ * single overloaded minute fails the whole chat turn.
+ */
+async function generateContentWithRetry(
+  ai: GoogleGenAI,
+  params: any,
+  maxAttempts = 3
+): Promise<any> {
+  let lastErr: any = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await ai.models.generateContent(params);
+    } catch (e: any) {
+      lastErr = e;
+      const status = e?.status ?? e?.error?.code;
+      const transient = status === 429 || status === 503 || status === 500;
+      if (!transient || attempt === maxAttempts) throw e;
+      const delayMs = Math.min(1000 * 2 ** attempt, 8000);
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw lastErr;
+}
+
 export const geminiProvider: ChatProvider = {
   keyEnvVar: "GEMINI_API_KEY",
   defaultModel: "gemini-3.8-flash",
@@ -55,7 +81,7 @@ export const geminiProvider: ChatProvider = {
     let finalText = "I wasn't able to answer that — please try again.";
 
     for (let round = 0; round < opts.maxRounds; round++) {
-      const response = await ai.models.generateContent({
+      const response = await generateContentWithRetry(ai, {
         model: opts.model,
         contents,
         config: {
