@@ -5,6 +5,7 @@ import {
   ThreadMessage,
 } from '../services/assistantService';
 import { useAuth } from '../contexts/AuthContext';
+import { useData } from '../contexts/DataContext';
 
 interface Message {
   role: 'user' | 'agent';
@@ -99,6 +100,7 @@ export const TruckCeoAgent: React.FC<TruckCeoAgentProps> = ({
   onSetupComplete,
 }) => {
   const { userProfile } = useAuth();
+  const { refetchAll } = useData();
   const role = userProfile?.role;
   const businessId = userProfile?.businessId;
 
@@ -365,6 +367,18 @@ export const TruckCeoAgent: React.FC<TruckCeoAgentProps> = ({
         response.toolCalls.some(tc => tc.name === 'complete_onboarding')
       ) {
         onSetupComplete?.();
+      }
+
+      // If the assistant wrote data (routes, trucks, team, business profile,
+      // alerts, EOD notes...), refresh the app's data so every list shows it
+      // immediately instead of waiting for the next sign-in.
+      const WRITE_TOOLS = new Set([
+        'update_business_profile', 'create_route', 'create_truck',
+        'add_team_member', 'request_data_feed_connection',
+        'create_alert', 'update_employee_status', 'log_eod_note',
+      ]);
+      if (response.toolCalls.some(tc => WRITE_TOOLS.has(tc.name) && tc.ok !== false)) {
+        try { await refetchAll(); } catch { /* non-fatal */ }
       }
 
       // Speak the reply aloud (respects speaker toggle + autoplay policy).
