@@ -452,8 +452,9 @@ const TOOLS: NeutralTool[] = [
   {
     name: "complete_onboarding",
     description:
-      "Mark setup complete. Call only after the business is named and at least one " +
-      "route, truck, and team member exist (or the user explicitly declines to add more). " +
+      "Mark setup complete. The backend enforces: business named, at least one " +
+      "route exists, and data feeds requested or explicitly skipped — it refuses " +
+      "otherwise. Call only when the interview is genuinely finished. " +
       "Sets the same flags as the manual wizard so the banner and wizard don't reappear.",
     parameters: { type: "object", properties: {} },
   },
@@ -473,6 +474,24 @@ const TOOLS: NeutralTool[] = [
         },
       },
       required: ["platform"],
+    },
+  },
+  {
+    name: "skip_setup_step",
+    description:
+      "Record that the owner declined a setup interview step (owner only). " +
+      "Call when the user says skip / no / not now / later for trucks, team, or " +
+      "data_feeds. This lets the interview move on honestly instead of pretending " +
+      "the step was done.",
+    parameters: {
+      type: "object",
+      properties: {
+        step: {
+          type: "string",
+          description: "One of: trucks, team, data_feeds",
+        },
+      },
+      required: ["step"],
     },
   },
 ];
@@ -1089,9 +1108,30 @@ async function execAddTeamMember(ctx: UserCtx, args: any): Promise<ToolResult> {
   }
 }
 
-async function execCompleteOnboarding(ctx: UserCtx): Promise<ToolResult> {
+async function execCompleteOnboarding(
+  ctx: UserCtx,
+  threadId: string
+): Promise<ToolResult> {
   const denied = requireOwner(ctx);
   if (denied) return denied;
+  const bid = ctx.businessIds[0];
+  // GUARD: never mark setup complete unless the essentials actually exist.
+  // (The interview once claimed "done" with nothing written — this enforces it.)
+  const progress = await getSetupProgress(bid, threadId);
+  if (!progress.businessNamed) {
+    return { ok: false, error: "Business name is still missing — can't complete setup yet." };
+  }
+  if (progress.routes === 0) {
+    return { ok: false, error: "No routes exist yet — can't complete setup yet." };
+  }
+  if (progress.feedsRequested === 0 && !progress.feedsSkipped) {
+    return {
+      ok: false,
+      error:
+        "Data feeds haven't been addressed yet — ask which platforms to connect " +
+        "(or record an explicit skip) before completing setup.",
+    };
+  }
   try {
     // Same flags the manual wizard sets — banner and wizard stay hidden after.
     await db.collection("users").doc(ctx.uid).set(
@@ -1105,6 +1145,103 @@ async function execCompleteOnboarding(ctx: UserCtx): Promise<ToolResult> {
   } catch (e) {
     logger.warn("execCompleteOnboarding: write failed", e);
     return { ok: false, error: "Couldn't mark setup complete right now." };
+  }
+}
+
+// Live setup state for one business + interview thread. Ground truth the
+// interview prompt is built on — the model must trust this over memory.
+interface SetupProgress {
+  businessNamed: boolean;
+  businessName: string | null;
+  routes: number;
+  trucks: number;
+  team: number;
+  feedsRequested: number;
+  feedsSkipped: boolean;
+  trucksSkipped: boolean;
+  teamSkipped: boolean;
+}
+
+async function getSetupProgress(bid: string, threadId: string): Promise<SetupProgress> {
+  const empty: SetupProgress = {
+    businessNamed: false,
+    businessName: null,
+    routes: 0,
+    trucks: 0,
+    team: 0,
+    feedsRequested: 0,
+    feedsSkipped: false,
+    trucksSkipped: false,
+    teamSkipped: false,
+  };
+  if (!bid) return empty;
+  try {
+    const [bSnap, rSnap, tSnap, eSnap, fSnap, thSnap] = await Promise.all([
+      db.collection("businesses").doc(bid).get(),
+      db.collection(`businesses/${bid}/routes`).get(),
+      db.collection(`businesses/${bid}/trucks`).get(),
+      db.collection(`businesses/${bid}/employees`).get(),
+      db.collection(`businesses/${bid}/dataFeedRequests`).where("status", "==", "requested").get(),
+      threadId
+        ? db.collection(`businesses/${bid}/assistantThreads`).doc(threadId).get()
+        : Promise.resolve(null as any),
+    ]);
+    // Count only docs that actually exist (phantom refs from failed writes don't count).
+    const realDocs = (s: admin.firestore.QuerySnapshot) =>
+      s.docs.filter((d) => {
+        try {
+          return d.exists;
+        } catch {
+          return true;
+        }
+      }).length;
+    const skips = thSnap && thSnap.exists ? ((thSnap.data() as any).setupSkips || {}) : {};
+    const name = bSnap.exists ? String((bSnap.data() as any).name || "").trim() : "";
+    return {
+      businessNamed: name.length > 0,
+      businessName: name || null,
+      routes: realDocs(rSnap),
+      trucks: realDocs(tSnap),
+      team: realDocs(eSnap),
+      feedsRequested: fSnap.size,
+      feedsSkipped: !!skips.data_feeds,
+      trucksSkipped: !!skips.trucks,
+      teamSkipped: !!skips.team,
+    };
+  } catch (e) {
+    logger.warn("getSetupProgress: read failed", e);
+    return empty;
+  }
+}
+
+async function execSkipSetupStep(
+  ctx: UserCtx,
+  args: any,
+  threadId: string
+): Promise<ToolResult> {
+  const denied = requireOwner(ctx);
+  if (denied) return denied;
+  const step = String(args.step || "").trim().toLowerCase();
+  if (!["trucks", "team", "data_feeds"].includes(step)) {
+    return { ok: false, error: "step must be one of: trucks, team, data_feeds." };
+  }
+  const bid = ctx.businessIds[0];
+  try {
+    // Dot-notation so concurrent skips merge instead of overwriting each other.
+    await db
+      .collection(`businesses/${bid}/assistantThreads`)
+      .doc(threadId)
+      .set(
+        {
+          [`setupSkips.${step}`]: true,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+    return { ok: true, data: { step, skipped: true } };
+  } catch (e) {
+    logger.warn("execSkipSetupStep: write failed", e);
+    return { ok: false, error: "Couldn't record the skip right now." };
   }
 }
 
@@ -1179,9 +1316,11 @@ async function runTool(
     case "add_team_member":
       return execAddTeamMember(ctx, args);
     case "complete_onboarding":
-      return execCompleteOnboarding(ctx);
+      return execCompleteOnboarding(ctx, threadId);
     case "request_data_feed_connection":
       return execRequestDataFeed(ctx, args);
+    case "skip_setup_step":
+      return execSkipSetupStep(ctx, args, threadId);
     default:
       return { ok: false, error: `Unknown tool: ${name}` };
   }
@@ -1235,14 +1374,27 @@ setup is incomplete. You are running the interview; they just answer.
 - CONFIRM BEFORE EVERY WRITE: state exactly what you will create
   ("I'll add route 2080 for Stamford — correct?") and call the write tool only
   after they confirm. Never batch unconfirmed writes.
+- HONESTY ABOUT WRITES (hard rule): only tell the user something was created,
+  added, set, or done AFTER the matching tool returns ok:true IN THIS
+  conversation. Never claim a write succeeded from memory or assumption. If a
+  tool returns ok:false, say exactly what failed and ask how to proceed — never
+  paper over it with a cheerful "done".
+- After the user answers a step, CALL THE TOOL for it — do not just acknowledge
+  the answer and move on. Every interview step must end in a tool call
+  (the write tool, or skip_setup_step).
+- If the user declines a step ("skip", "no", "not now", "later"), call
+  skip_setup_step for trucks, team, or data_feeds — then move on. Never mark a
+  declined step as done.
 - CREDENTIALS: NEVER ask for, accept, or store passwords, logins, or API keys.
   If the user offers one, politely refuse: explain you can't take passwords in
   chat, and offer the secure path instead — the platform's own login/OAuth, or
   request_data_feed_connection so GYBs wires it during setup. No credential
   fields exist on any tool; never invent them.
-- When the business is named and at least one route, truck, and team member
-  exist (or the user explicitly declines to add more), call
+- When the business is named, at least one route exists, and data feeds are
+  requested or explicitly skipped (trucks/team may be skipped), call
   complete_onboarding, congratulate them, and summarize what was set up.
+  The tool enforces these requirements and will refuse if they aren't met —
+  if it refuses, go back and finish the missing step instead of arguing.
   Mention they can change anything later by just chatting, or use MENU →
   Setup guide for the manual step-by-step wizard.
 - If the user goes off-topic, answer briefly and steer back to the interview.`
@@ -1283,7 +1435,36 @@ async function runAssistantTurn(
   setupMode: boolean
 ): Promise<TurnResult> {
   const scoped = buildScopedContext(ctx, brain);
-  const systemInstruction = buildSystemPrompt(ctx, brain, scoped, setupMode);
+  let systemInstruction = buildSystemPrompt(ctx, brain, scoped, setupMode);
+
+  // In setup mode, ground every turn in live database state so the interview
+  // can never drift from reality (e.g. claiming a write that never landed).
+  if (setupMode && ctx.businessIds[0]) {
+    try {
+      const p = await getSetupProgress(ctx.businessIds[0], threadId);
+      const next = !p.businessNamed
+        ? "ask for the business name"
+        : p.routes === 0
+          ? "ask for the first route (number, territory, bakery)"
+          : p.trucks === 0 && !p.trucksSkipped
+            ? "ask for a truck (label/plate and route)"
+            : p.team === 0 && !p.teamSkipped
+              ? "ask for a team member (name, role, route)"
+              : p.feedsRequested === 0 && !p.feedsSkipped
+                ? "ask which data-feed platforms to connect"
+                : "interview is complete — call complete_onboarding";
+      systemInstruction +=
+        `\n\nSETUP PROGRESS — live database state (ground truth; trust this over ` +
+        `your conversation memory):\n` +
+        `- Business named: ${p.businessNamed ? `yes ("${p.businessName}")` : "NO"}\n` +
+        `- Routes: ${p.routes} | Trucks: ${p.trucks}${p.trucksSkipped ? " (skipped)" : ""} | ` +
+        `Team: ${p.team}${p.teamSkipped ? " (skipped)" : ""}\n` +
+        `- Data feeds: ${p.feedsRequested > 0 ? `${p.feedsRequested} requested` : p.feedsSkipped ? "skipped" : "NOT YET ADDRESSED"}\n` +
+        `Your next required step: ${next}.`;
+    } catch (e) {
+      logger.warn("runAssistantTurn: setup progress check failed", e);
+    }
+  }
 
   const turn = await provider.runTurn({
     apiKey,
