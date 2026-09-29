@@ -110,10 +110,10 @@ function redactBrainForMember(brain: any, ctx: UserCtx): any {
   return redacted;
 }
 
-// ─── Auth / user context / rate limit ──────────────────────────────────────
-async function getUserCtx(req: any): Promise<UserCtx | null> {
-  const auth = req.headers.authorization || "";
-  const m = auth.match(/^Bearer (.+)$/);
+
+;async function getUserCtx(req: any): Promise<UserCtx | null> {
+  const authz = req.headers.authorization || "";
+  const m = authz.match(/^Bearer (.+)$/);
   if (!m) return null;
   let decoded: admin.auth.DecodedIdToken;
   try {
@@ -122,24 +122,42 @@ async function getUserCtx(req: any): Promise<UserCtx | null> {
     return null;
   }
   const uid = decoded.uid;
-  const empSnap = await db.collection("employees").doc(uid).get();
-  if (!empSnap.exists) return null;
-  const emp = empSnap.data() as any;
-  const role = emp.role;
-  if (!["owner", "business_manager", "driver"].includes(role)) return null;
+  // Canonical identity lives in the top-level `users` collection, written by
+  // the app's AuthContext on sign-up and on invite-code join:
+  //   owner signup -> { role: 'business_owner', businessId }
+  //   invite join  -> { role: 'team_member' | 'business_manager', businessId, employeeId, routeIds }
+  // (Employee records live under businesses/{bid}/employees keyed by
+  // employeeId — never look them up by Firebase UID.)
+  const userSnap = await db.collection("users").doc(uid).get();
+  if (!userSnap.exists) return null;
+  const u = userSnap.data() as any;
+  let role: UserCtx["role"];
+  if (u.role === "business_owner") role = "owner";
+  else if (u.role === "business_manager") role = "business_manager";
+  else if (u.role === "team_member") role = "driver";
+  else return null;
+  const businessIds: string[] = [];
+  if (typeof u.businessId === "string" && u.businessId) businessIds.push(u.businessId);
+  if (Array.isArray(u.businessIds)) { 
+    for (const b of u.businessIds) {
+      if (typeof b === "string" && b && !businessIds.includes(b)) businessIds.push(b);
+    }
+  }
+  const routeIds: string[] = Array.isArray(u.routeIds)
+    ? u.routeIds.filter((r: any) => typeof r === "string" && r)
+    : [];
   return {
     uid,
     role,
-    businessIds: emp.businessIds || [],
-    routeIds: emp.routeIds || [],
-    name: emp.name || decoded.name || "there",
+    businessIds,
+    routeIds,
+    name: u.displayName || u.name || decoded.name || "there",
   };
-}
-
-async function checkRateLimit(uid: string): Promise<boolean> {
+  }
+  async function checkRateLimit(uid: string): Promise<boolean> {
   const ref = db.collection("assistantRateLimits").doc(uid);
-  const now = Date.now();
-  const snap = await ref.get();
+   const now = Date.now();
+  const snap = await ref.get();    
   let entry = snap.exists ? (snap.data() as any) : { count: 0, windowStart: now };
   if (now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
     entry = { count: 0, windowStart: now };
