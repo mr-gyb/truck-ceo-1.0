@@ -44,20 +44,30 @@ const AppContent: React.FC = () => {
   const [wizardSkippedThisSession, setWizardSkippedThisSession] = useState(false);
   const [setupCompleted, setSetupCompleted] = useState(false);
 
-  // Auto-open the setup wizard for owners who haven't finished onboarding and
-  // are missing core data (routes, trucks, or team). "Skip for now" is sticky
-  // for the session so it never reopens until the next sign-in.
+  // Conversational setup (owner only): when an owner signs in with incomplete
+  // setup (missing routes, trucks, or team), the Mateo AI assistant opens in
+  // setup mode and runs the interview — business → routes → trucks → team →
+  // data feeds — doing every backend write itself. Closing the panel dismisses
+  // setup for the session. The 7-step wizard stays as the manual fallback
+  // (Complete Setup banner + MENU → Setup guide) and no longer auto-opens.
+  const [setupMode, setSetupMode] = useState(false);
+  const [setupAutoOpenKey, setSetupAutoOpenKey] = useState(0);
+  const [setupDismissedThisSession, setSetupDismissedThisSession] = useState(false);
+
   useEffect(() => {
     if (authLoading || dataLoading || !currentUser || !userProfile) return;
     if (userProfile.role !== 'business_owner') return;
     if (userProfile.onboardingCompleted === true || setupCompleted) return;
-    if (wizardSkippedThisSession || wizardOpen) return;
+    if (setupDismissedThisSession || setupMode) return;
     const missingData = routes.length === 0 || trucks.length === 0 || employees.length === 0;
-    if (missingData) setWizardOpen(true);
+    if (missingData) {
+      setSetupMode(true);
+      setSetupAutoOpenKey(k => k + 1);
+    }
   }, [
     authLoading, dataLoading, currentUser, userProfile,
     routes.length, trucks.length, employees.length,
-    setupCompleted, wizardSkippedThisSession, wizardOpen,
+    setupCompleted, setupDismissedThisSession, setupMode,
   ]);
 
   const showSetupBanner =
@@ -190,7 +200,20 @@ const AppContent: React.FC = () => {
     <Layout
       activeView={activeView}
       onViewChange={setActiveView}
-      floating={activeView === 'dashboard' ? <TruckCeoAgent /> : null}
+      floating={activeView === 'dashboard' ? (
+        <TruckCeoAgent
+          setupMode={setupMode}
+          autoOpenKey={setupAutoOpenKey}
+          onSetupDismiss={() => {
+            setSetupDismissedThisSession(true);
+            setSetupMode(false);
+          }}
+          onSetupComplete={() => {
+            setSetupMode(false);
+            setSetupCompleted(true);
+          }}
+        />
+      ) : null}
       onSetupGuide={() => setWizardOpen(true)}
     >
       {showSetupBanner && (
