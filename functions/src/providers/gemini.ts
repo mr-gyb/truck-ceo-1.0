@@ -38,7 +38,7 @@ function toFunctionDeclarations(tools: NeutralTool[]): FunctionDeclaration[] {
 
 export const geminiProvider: ChatProvider = {
   keyEnvVar: "GEMINI_API_KEY",
-  defaultModel: "gemini-2.5-flash",
+  defaultModel: "gemini-3.8-flash",
 
   async runTurn(opts: TurnOptions): Promise<ProviderTurnResult> {
     const ai = new GoogleGenAI({ apiKey: opts.apiKey });
