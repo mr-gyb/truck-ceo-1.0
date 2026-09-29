@@ -341,6 +341,8 @@ const EodTab: React.FC<{ businessId: string; routeId: string; driverName: string
     if (readOnly || complete < 5 || !currentUser) return;
     setSaving(true);
     try {
+      // merge:true keeps assistant-appended notes (assistantNotes) when the
+      // driver re-submits — the assistant backend only ever arrayUnions there.
       await setDoc(doc(db, `businesses/${businessId}/routes/${routeId}/eod`, dayId), {
         date: dayId,
         piecesLeft: Number(f.piecesLeft),
@@ -351,7 +353,7 @@ const EodTab: React.FC<{ businessId: string; routeId: string; driverName: string
         submittedAt: serverTimestamp(),
         submittedBy: currentUser.uid,
         driverName
-      });
+      }, { merge: true });
       const snap = await getDoc(doc(db, `businesses/${businessId}/routes/${routeId}/eod`, dayId));
       if (snap.exists()) setExisting(snap.data() as DriverEod);
       showToast(existing ? 'End of day updated' : 'End of day submitted', 'success');

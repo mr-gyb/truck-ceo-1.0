@@ -10,9 +10,12 @@ interface LayoutProps {
   activeView: View;
   onViewChange: (view: View) => void;
   floating?: React.ReactNode;
+  /** Owner-only: reopens the setup wizard. When provided, "Setup guide"
+      appears in the MORE OPTIONS menu. */
+  onSetupGuide?: () => void;
 }
 
-export const Layout: React.FC<LayoutProps> = ({ children, activeView, onViewChange, floating }) => {
+export const Layout: React.FC<LayoutProps> = ({ children, activeView, onViewChange, floating, onSetupGuide }) => {
   const { logout, userProfile } = useAuth();
   const [isBottomMenuOpen, setIsBottomMenuOpen] = useState(false);
 
@@ -95,6 +98,17 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeView, onViewChan
               active={activeView === 'settings'}
               onClick={() => handleBottomMenuClick('settings')}
             />
+            {onSetupGuide && (
+              <MenuButton
+                label="Setup guide"
+                icon="fa-clipboard-check"
+                active={false}
+                onClick={() => {
+                  setIsBottomMenuOpen(false);
+                  onSetupGuide();
+                }}
+              />
+            )}
           </div>
         </div>
       )}
