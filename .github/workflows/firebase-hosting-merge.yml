@@ -46,4 +46,8 @@ jobs:
       # to hold these roles on the truck-ceo project (Chris approves once in the
       # GCP console: IAM & Admin -> IAM):
       #   roles/cloudfunctions.developer, roles/run.admin, roles/iam.serviceAccountUser
-      - run: npx -y firebase-tools@latest deploy --only hosting,functions --project truck-ceo
+      # Hosting deploys FIRST as its own step so the site release always finalizes,
+      # even if the functions step exits non-zero on its cosmetic Artifact Registry
+      # cleanup-policy step (the function itself deploys fine before that step).
+      - run: npx -y firebase-tools@latest deploy --only hosting --project truck-ceo
+      - run: npx -y firebase-tools@latest deploy --only functions --project truck-ceo
