@@ -1,13 +1,14 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { useAuth } from './AuthContext';
 import { FirestoreService } from '../services/firestoreService';
-import { Product, Employee, Truck, SaleAlert, RouteTerritory } from '../types';
+import { Product, Employee, Truck, SaleAlert, RouteTerritory, OperationalAlert } from '../types';
 
 interface DataContextType {
   products: Product[];
   employees: Employee[];
   trucks: Truck[];
   saleAlerts: SaleAlert[];
+  alerts: OperationalAlert[];
   routes: RouteTerritory[];
   loading: boolean;
   firestoreService: FirestoreService | null;
@@ -55,6 +56,7 @@ export const DataProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [trucks, setTrucks] = useState<Truck[]>([]);
   const [saleAlerts, setSaleAlerts] = useState<SaleAlert[]>([]);
+  const [alerts, setAlerts] = useState<OperationalAlert[]>([]);
   const [routes, setRoutes] = useState<RouteTerritory[]>([]);
   const [loading, setLoading] = useState(true);
   const [firestoreService, setFirestoreService] = useState<FirestoreService | null>(null);
@@ -65,18 +67,20 @@ export const DataProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (userProfile?.role === 'business_owner') {
         // Business owners see everything
         console.log('Fetching all data for business owner...');
-        const [p, e, t, s, r] = await Promise.all([
+        const [p, e, t, s, r, a] = await Promise.all([
           service.getProducts(),
           service.getEmployees(),
           service.getTrucks(),
           service.getSaleAlerts(),
-          service.getRoutes()
+          service.getRoutes(),
+          service.getOperationalAlerts()
         ]);
         setProducts(p);
         setEmployees(e);
         setTrucks(t);
         setSaleAlerts(s);
         setRoutes(r);
+        setAlerts(a);
         console.log('Loaded:', { products: p.length, employees: e.length, trucks: t.length, routes: r.length });
       } else if (userProfile?.role === 'team_member' && userProfile.employeeId) {
         // Team members see only their assigned routes and related data
@@ -97,6 +101,7 @@ export const DataProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setEmployees([employee]); // Only their own profile
           setTrucks([]); // Team members don't see fleet
           setSaleAlerts([]); // Team members don't see sale alerts
+          setAlerts([]); // Team members don't see operational alerts
           console.log('Loaded:', { products: p.length, routes: r.length });
         }
       }
@@ -228,6 +233,7 @@ export const DataProvider: React.FC<{ children: React.ReactNode }> = ({ children
     employees,
     trucks,
     saleAlerts,
+    alerts,
     routes,
     loading,
     firestoreService,

@@ -10,7 +10,6 @@ import {
 } from 'firebase/auth';
 import { doc, getDoc, setDoc, collection, updateDoc, increment } from 'firebase/firestore';
 import { auth, db } from '../services/firebaseConfig';
-import { migrateInitialData } from '../scripts/migrateData';
 
 interface UserProfile {
   email: string;
@@ -19,6 +18,9 @@ interface UserProfile {
   businessId: string;
   employeeId?: string;
   routeIds?: string[];
+  // Welcome onboarding state (set by the onboarding wizard).
+  onboardingCompleted?: boolean;
+  onboardingSkippedAt?: unknown;
 }
 
 interface AuthContextType {
@@ -109,8 +111,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       createdAt: new Date()
     });
 
-    console.log('Migrating initial demo data...');
-    await migrateInitialData(businessId);
+    console.log('New owner signup — leaving the business empty so the setup wizard guides real data entry.');
 
     setNeedsRoleSelection(false);
     await fetchUserProfile(user.uid);
