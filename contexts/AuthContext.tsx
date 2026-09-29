@@ -132,19 +132,25 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       businessId: string;
       routeId: string;
       routeName: string;
+      role?: string;
     };
 
-    const displayName = pendingName || user.displayName || user.email || 'Driver';
+    // Invite links carry their own role: 'team_member' (driver view) or
+    // 'business_manager' (business view). Legacy per-route codes have no role
+    // field and default to the driver view.
+    const accountRole = invite.role === 'business_manager' ? 'business_manager' : 'team_member';
+    const routeIds = invite.routeId ? [invite.routeId] : [];
+    const displayName = pendingName || user.displayName || user.email || (accountRole === 'business_manager' ? 'Partner' : 'Driver');
 
-    // Create the employee record under the owner's business so the driver
-    // shows up in the team list with their assigned route.
+    // Create the employee record under the owner's business so the joiner
+    // shows up in the team list.
     const empRef = doc(collection(db, `businesses/${invite.businessId}/employees`));
     await setDoc(empRef, {
       name: displayName,
-      role: 'driver',
+      role: accountRole === 'business_manager' ? 'manager' : 'driver',
       userId: user.uid,
       email: user.email || null,
-      assignedRoutes: [invite.routeId],
+      assignedRoutes: routeIds,
       status: 'active',
       hoursThisWeek: 0,
       engagementScore: 0,
@@ -156,18 +162,29 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       createdAt: new Date()
     });
 
-    // Link the auth user to the business, route, and (via business) the owner.
+    // Link the auth user to the business (and route, when the invite is route-scoped).
     await setDoc(doc(db, 'users', user.uid), {
       email: user.email,
       displayName,
-      role: 'team_member',
+      role: accountRole,
       businessId: invite.businessId,
       employeeId: empRef.id,
-      routeIds: [invite.routeId],
+      routeIds,
       createdAt: new Date()
     });
 
     await updateDoc(doc(db, 'inviteCodes', code), { usedCount: increment(1) });
+    // Dual-written business-level links also track usage under the business.
+    try {
+      await updateDoc(doc(db, `businesses/${invite.businessId}/invites`, code), { usedCount: increment(1) });
+    } catch {
+      // Legacy per-route codes have no business-level copy — not an error.
+    }
+
+    // Clean an invite deep link (/join/{code}) back to the app root.
+    if (window.location.pathname.toLowerCase().startsWith('/join/')) {
+      window.history.replaceState(null, '', '/');
+    }
 
     setNeedsRoleSelection(false);
     await fetchUserProfile(user.uid);
