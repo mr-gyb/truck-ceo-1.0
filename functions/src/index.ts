@@ -3,11 +3,21 @@
  *
  * Backend intelligence for the TruckCEO app. Exposes a single HTTPS callable
  * surface `/api/askAssistant` (Firebase rewrite) backed by a chat model with
- * 9 server-side tools:
+ * 16 server-side tools:
  *
  * Reads:  get_business_overview, get_route_summary, get_driver_score,
- *         get_eod_history, get_open_alerts
- * Writes: log_eod_note, create_alert, update_employee_status, escalate_to_gybs
+ *         get_eod_history, get_open_alerts, get_onboarding_status
+ * Writes: log_eod_note, create_alert, update_employee_status, escalate_to_gybs,
+ *         update_business_profile, create_route, create_truck, add_team_member,
+ *         complete_onboarding, request_data_feed_connection
+ *
+ * Setup mode: when the frontend passes `setupMode: true` (owner signing in
+ * with incomplete setup), the assistant runs a guided onboarding interview —
+ * business → routes → trucks → team → data feeds — doing every backend write
+ * itself via the onboarding tools above. All onboarding writes are
+ * owner-only. No tool accepts or stores credentials of any kind: data-feed
+ * connections are queued for GYBs (or the platform's own OAuth), never
+ * collected in chat.
  *
  * MODEL PROVIDER: selected via env MODEL_PROVIDER ("gemini" | "meta" | "openai",
  * default "gemini"). Gemini is the day-1 ship target; Meta Muse Spark and
@@ -373,6 +383,98 @@ const TOOLS: NeutralTool[] = [
       required: ["summary"],
     },
   },
+  // ── Onboarding tools (setup mode — owner only) ──────────────────────────
+  {
+    name: "get_onboarding_status",
+    description:
+      "Check what is still missing for setup: business name, route count, truck count, " +
+      "team count, and pending data-feed requests. Call this first in setup mode.",
+    parameters: { type: "object", properties: {} },
+  },
+  {
+    name: "update_business_profile",
+    description:
+      "Set the business display name (owner only). Confirm with the user before calling.",
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Business display name" },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "create_route",
+    description:
+      "Create a route: bakery route number, territory name, bakery (owner only). " +
+      "Confirm the details with the user before calling.",
+    parameters: {
+      type: "object",
+      properties: {
+        routeNumber: { type: "string", description: "Bakery route number, e.g. '2080'" },
+        territory: { type: "string", description: "Territory name, e.g. 'Stamford / Greenwich'" },
+        bakery: { type: "string", description: "Bakery, e.g. 'Bimbo', 'Flowers', or 'Other'" },
+      },
+      required: ["routeNumber", "territory"],
+    },
+  },
+  {
+    name: "create_truck",
+    description:
+      "Create a truck with a label/identifier and optionally assign it to a route " +
+      "(owner only). Confirm the details with the user before calling.",
+    parameters: {
+      type: "object",
+      properties: {
+        label: { type: "string", description: "Truck label, plate, or identifier" },
+        route: { type: "string", description: "Route number or name to assign it to (optional)" },
+      },
+      required: ["label"],
+    },
+  },
+  {
+    name: "add_team_member",
+    description:
+      "Add a team member (driver) and generate their invite code (owner only). " +
+      "Returns the invite code — read it to the owner so they can text it to the driver. " +
+      "Confirm the details with the user before calling.",
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Team member's name" },
+        role: { type: "string", description: "Role: 'driver' (default) or 'business_manager'" },
+        phone: { type: "string", description: "Phone number (optional)" },
+        route: { type: "string", description: "Route number or name they drive (optional)" },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "complete_onboarding",
+    description:
+      "Mark setup complete. Call only after the business is named and at least one " +
+      "route, truck, and team member exist (or the user explicitly declines to add more). " +
+      "Sets the same flags as the manual wizard so the banner and wizard don't reappear.",
+    parameters: { type: "object", properties: {} },
+  },
+  {
+    name: "request_data_feed_connection",
+    description:
+      "Queue a data-feed connection request for GYBs to wire (owner only). " +
+      "Use when the user wants a platform connected (bakery portals, telematics, " +
+      "accounting). NEVER collect usernames, passwords, or API keys — there are no " +
+      "credential fields; the secure connection happens outside chat.",
+    parameters: {
+      type: "object",
+      properties: {
+        platform: {
+          type: "string",
+          description: "Platform to connect, e.g. 'Bimbo ION', 'Flowers IDP', 'Samsara'",
+        },
+      },
+      required: ["platform"],
+    },
+  },
 ];
 
 // ─── Tool executors ────────────────────────────────────────────────────────
@@ -723,6 +825,323 @@ async function execEscalate(ctx: UserCtx, args: any, threadId: string): Promise<
   }
 }
 
+// ─── Onboarding tools (setup mode — owner only) ────────────────────────────
+
+/** All onboarding writes are owner-only. Returns an error result when not owner. */
+function requireOwner(ctx: UserCtx): ToolResult | null {
+  if (ctx.role !== "owner") {
+    return { ok: false, error: "Only the business owner can change setup." };
+  }
+  if (!ctx.businessIds[0]) {
+    return { ok: false, error: "No business linked to your account." };
+  }
+  return null;
+}
+
+/**
+ * Find a Firestore route doc by route number or name (direct Firestore match,
+ * not the brain — setup routes may not be in the brain yet).
+ */
+async function findRouteDoc(
+  bid: string,
+  ref: string
+): Promise<{ id: string; data: any } | null> {
+  const q = ref.trim().toLowerCase();
+  const digits = ref.replace(/\D/g, "");
+  try {
+    const snap = await db.collection(`businesses/${bid}/routes`).get();
+    for (const d of snap.docs) {
+      const data = d.data() as any;
+      const rn = data.routeNumber != null ? String(data.routeNumber) : "";
+      const nm = String(data.name || "").toLowerCase();
+      if (
+        d.id === ref ||
+        (rn !== "" && (rn === ref || rn.replace(/\D/g, "") === digits)) ||
+        (digits.length >= 3 && nm.replace(/\D/g, "").includes(digits)) ||
+        (q.length >= 3 && nm.includes(q))
+      ) {
+        return { id: d.id, data };
+      }
+    }
+  } catch (e) {
+    logger.warn("findRouteDoc: routes read failed", e);
+  }
+  return null;
+}
+
+async function execOnboardingStatus(ctx: UserCtx): Promise<ToolResult> {
+  const denied = requireOwner(ctx);
+  if (denied) return denied;
+  const bid = ctx.businessIds[0];
+  try {
+    const [bSnap, rSnap, tSnap, eSnap, fSnap, uSnap] = await Promise.all([
+      db.collection("businesses").doc(bid).get(),
+      db.collection(`businesses/${bid}/routes`).get(),
+      db.collection(`businesses/${bid}/trucks`).get(),
+      db.collection(`businesses/${bid}/employees`).get(),
+      db.collection(`businesses/${bid}/dataFeedRequests`).where("status", "==", "requested").get(),
+      db.collection("users").doc(ctx.uid).get(),
+    ]);
+    const businessName = bSnap.exists ? (bSnap.data() as any).name || null : null;
+    const routeCount = rSnap.size;
+    const truckCount = tSnap.size;
+    const teamCount = eSnap.size;
+    const missing: string[] = [];
+    if (!businessName) missing.push("business name");
+    if (routeCount === 0) missing.push("routes");
+    if (truckCount === 0) missing.push("trucks");
+    if (teamCount === 0) missing.push("team");
+    return {
+      ok: true,
+      data: {
+        businessName,
+        routeCount,
+        truckCount,
+        teamCount,
+        pendingDataFeedRequests: fSnap.size,
+        onboardingCompleted: uSnap.exists
+          ? !!(uSnap.data() as any).onboardingCompleted
+          : false,
+        missing,
+      },
+    };
+  } catch (e) {
+    logger.warn("execOnboardingStatus: read failed", e);
+    return { ok: false, error: "Couldn't check setup status right now." };
+  }
+}
+
+async function execUpdateBusinessProfile(ctx: UserCtx, args: any): Promise<ToolResult> {
+  const denied = requireOwner(ctx);
+  if (denied) return denied;
+  const name = String(args.name || "").trim();
+  if (!name) return { ok: false, error: "A business name is required." };
+  try {
+    await db.collection("businesses").doc(ctx.businessIds[0]).set(
+      { name: name.slice(0, 120), updatedAt: admin.firestore.FieldValue.serverTimestamp() },
+      { merge: true }
+    );
+    return { ok: true, data: { name } };
+  } catch (e) {
+    logger.warn("execUpdateBusinessProfile: write failed", e);
+    return { ok: false, error: "Couldn't save the business name right now." };
+  }
+}
+
+async function execCreateRoute(ctx: UserCtx, args: any): Promise<ToolResult> {
+  const denied = requireOwner(ctx);
+  if (denied) return denied;
+  const routeNumber = String(args.routeNumber || "").trim();
+  const territory = String(args.territory || "").trim();
+  if (!routeNumber || !territory) {
+    return { ok: false, error: "Route number and territory are required." };
+  }
+  const bid = ctx.businessIds[0];
+  try {
+    const ref = await db.collection(`businesses/${bid}/routes`).add({
+      name: territory.slice(0, 120),
+      routeNumber: routeNumber.slice(0, 24),
+      bakery: args.bakery ? String(args.bakery).slice(0, 60) : null,
+      stores: [],
+      createdBy: ctx.uid,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      via: "assistant",
+    });
+    return { ok: true, data: { routeId: ref.id, routeNumber, territory } };
+  } catch (e) {
+    logger.warn("execCreateRoute: write failed", e);
+    return { ok: false, error: "Couldn't create the route right now." };
+  }
+}
+
+async function execCreateTruck(ctx: UserCtx, args: any): Promise<ToolResult> {
+  const denied = requireOwner(ctx);
+  if (denied) return denied;
+  const label = String(args.label || "").trim();
+  if (!label) return { ok: false, error: "A truck label or plate is required." };
+  const bid = ctx.businessIds[0];
+  try {
+    const ref = await db.collection(`businesses/${bid}/trucks`).add({
+      plate: label.slice(0, 24),
+      type: "Box truck",
+      mileage: 0,
+      lastService: "",
+      healthStatus: "good",
+      issues: [],
+      maintenanceHistory: [],
+      registrationExpiry: "",
+      insuranceExpiry: "",
+      dimensions: { height: 13.5, length: 26, weight: 26000 },
+      upkeep: { tires: 100, oil: 100, brakes: 100 },
+      createdBy: ctx.uid,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      via: "assistant",
+    });
+    // Optional route assignment: link the route doc back to this truck.
+    let assignedRoute: string | null = null;
+    if (args.route) {
+      const match = await findRouteDoc(bid, String(args.route));
+      if (match) {
+        await db
+          .collection(`businesses/${bid}/routes`)
+          .doc(match.id)
+          .set({ assignedTruckId: ref.id }, { merge: true });
+        assignedRoute = match.data.name || match.id;
+      }
+    }
+    return { ok: true, data: { truckId: ref.id, label, assignedRoute } };
+  } catch (e) {
+    logger.warn("execCreateTruck: write failed", e);
+    return { ok: false, error: "Couldn't create the truck right now." };
+  }
+}
+
+const INVITE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+async function execAddTeamMember(ctx: UserCtx, args: any): Promise<ToolResult> {
+  const denied = requireOwner(ctx);
+  if (denied) return denied;
+  const name = String(args.name || "").trim();
+  if (!name) return { ok: false, error: "A name is required." };
+  const role = args.role === "business_manager" ? "business_manager" : "driver";
+  const bid = ctx.businessIds[0];
+  try {
+    // Optional route link.
+    let routeId: string | null = null;
+    let routeName: string | null = null;
+    if (args.route) {
+      const match = await findRouteDoc(bid, String(args.route));
+      if (match) {
+        routeId = match.id;
+        routeName = match.data.name || match.id;
+      }
+    }
+    const empRef = await db.collection(`businesses/${bid}/employees`).add({
+      name: name.slice(0, 120),
+      role,
+      phone: args.phone ? String(args.phone).slice(0, 32) : null,
+      hoursThisWeek: 0,
+      engagementScore: 0,
+      status: "active",
+      salesHistory: [],
+      attendance: [],
+      vacationDaysUsed: 0,
+      sickDaysUsed: 0,
+      assignedRoutes: routeId ? [routeId] : [],
+      createdBy: ctx.uid,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      via: "assistant",
+    });
+    if (routeId) {
+      await db
+        .collection(`businesses/${bid}/employees`)
+        .doc(empRef.id)
+        .set({ userId: null, email: null }, { merge: true });
+      await db
+        .collection(`businesses/${bid}/routes`)
+        .doc(routeId)
+        .set({ assignedDriverId: empRef.id }, { merge: true });
+    }
+    // Invite code — same scheme as the owner-side DriverInvite component:
+    // written to top-level `inviteCodes/{code}` (redeemed at join) and
+    // mirrored under businesses/{bid}/invites/{code}.
+    let code = "";
+    for (let attempt = 0; attempt < 5 && !code; attempt++) {
+      let candidate = "";
+      for (let i = 0; i < 6; i++) {
+        candidate += INVITE_CHARS[Math.floor(Math.random() * INVITE_CHARS.length)];
+      }
+      const exists = await db.collection("inviteCodes").doc(candidate).get();
+      if (!exists.exists) code = candidate;
+    }
+    if (!code) {
+      logger.warn("execAddTeamMember: invite code collision retries exhausted");
+      return {
+        ok: true,
+        data: {
+          employeeId: empRef.id,
+          name,
+          role,
+          routeName,
+          inviteCode: null,
+          note: "Team member added, but the invite code needs generating from Routes → Driver Invite.",
+        },
+      };
+    }
+    const payload = {
+      code,
+      businessId: bid,
+      routeId,
+      routeName,
+      createdBy: ctx.uid,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      usedCount: 0,
+    };
+    await db.collection("inviteCodes").doc(code).set(payload);
+    await db.collection(`businesses/${bid}/invites`).doc(code).set(payload);
+    return {
+      ok: true,
+      data: { employeeId: empRef.id, name, role, routeName, inviteCode: code },
+    };
+  } catch (e) {
+    logger.warn("execAddTeamMember: write failed", e);
+    return { ok: false, error: "Couldn't add the team member right now." };
+  }
+}
+
+async function execCompleteOnboarding(ctx: UserCtx): Promise<ToolResult> {
+  const denied = requireOwner(ctx);
+  if (denied) return denied;
+  try {
+    // Same flags the manual wizard sets — banner and wizard stay hidden after.
+    await db.collection("users").doc(ctx.uid).set(
+      {
+        onboardingCompleted: true,
+        onboardingCompletedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+    return { ok: true, data: { completed: true } };
+  } catch (e) {
+    logger.warn("execCompleteOnboarding: write failed", e);
+    return { ok: false, error: "Couldn't mark setup complete right now." };
+  }
+}
+
+async function execRequestDataFeed(ctx: UserCtx, args: any): Promise<ToolResult> {
+  const denied = requireOwner(ctx);
+  if (denied) return denied;
+  const platform = String(args.platform || "").trim();
+  if (!platform) return { ok: false, error: "A platform name is required." };
+  const bid = ctx.businessIds[0];
+  try {
+    // Queued for GYBs to wire — never credentials; no credential fields exist.
+    await db.collection(`businesses/${bid}/dataFeedRequests`).add({
+      platform: platform.slice(0, 120),
+      status: "requested",
+      requestedBy: ctx.uid,
+      requestedByName: ctx.name,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      via: "assistant",
+    });
+    // Also drop it in the ops inbox so the GYBs loop picks it up.
+    await db.collection("agentInbox").add({
+      type: "data_feed_request",
+      summary: `Data feed connection requested: ${platform} (business ${bid})`,
+      fromUid: ctx.uid,
+      fromName: ctx.name,
+      fromRole: ctx.role,
+      businessId: bid,
+      status: "open",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    return { ok: true, data: { platform, status: "requested" } };
+  } catch (e) {
+    logger.warn("execRequestDataFeed: write failed", e);
+    return { ok: false, error: "Couldn't queue the connection request right now." };
+  }
+}
+
 async function runTool(
   ctx: UserCtx,
   name: string,
@@ -749,6 +1168,20 @@ async function runTool(
       return execUpdateEmployeeStatus(ctx, args);
     case "escalate_to_gybs":
       return execEscalate(ctx, args, threadId);
+    case "get_onboarding_status":
+      return execOnboardingStatus(ctx);
+    case "update_business_profile":
+      return execUpdateBusinessProfile(ctx, args);
+    case "create_route":
+      return execCreateRoute(ctx, args);
+    case "create_truck":
+      return execCreateTruck(ctx, args);
+    case "add_team_member":
+      return execAddTeamMember(ctx, args);
+    case "complete_onboarding":
+      return execCompleteOnboarding(ctx);
+    case "request_data_feed_connection":
+      return execRequestDataFeed(ctx, args);
     default:
       return { ok: false, error: `Unknown tool: ${name}` };
   }
@@ -774,13 +1207,46 @@ function buildScopedContext(ctx: UserCtx, brain: any): any {
   };
 }
 
-function buildSystemPrompt(ctx: UserCtx, brain: any, scoped: any): string {
+function buildSystemPrompt(ctx: UserCtx, brain: any, scoped: any, setupMode: boolean): string {
   const roleLine =
     ctx.role === "owner"
       ? "You are assisting Chris, the owner of the whole operation."
       : ctx.role === "business_manager"
         ? `You are assisting ${ctx.name}, a business manager (businesses: ${(ctx.businessIds || []).join(", ") || "assigned"}).`
         : `You are assisting ${ctx.name}, a driver. They can ONLY see their assigned route(s): ${(ctx.routeIds || []).join(", ") || "none assigned"}.`;
+
+  const setupSection = setupMode
+    ? `
+
+SETUP MODE — guided onboarding interview. The owner just signed in and their
+setup is incomplete. You are running the interview; they just answer.
+- FIRST: call get_onboarding_status to see exactly what is missing, then greet
+  the owner warmly by name and explain you'll get them set up in a few minutes.
+- Interview order: (1) business name, (2) routes — for each: bakery route
+  number, territory name, bakery (Bimbo / Flowers / other), (3) trucks —
+  label/plate and which route it serves, (4) team — for each: name, role
+  (driver), route; after adding a team member, READ the invite code to the
+  owner and tell them to text it to that driver so they can join, (5) data
+  feeds — ask which platforms they want connected (bakery portals, telematics,
+  accounting).
+- Ask ONE question at a time and wait for the answer. Keep a mental checklist;
+  move on only when the current item is answered. The user may answer in
+  English or Spanish — mirror their language entirely.
+- CONFIRM BEFORE EVERY WRITE: state exactly what you will create
+  ("I'll add route 2080 for Stamford — correct?") and call the write tool only
+  after they confirm. Never batch unconfirmed writes.
+- CREDENTIALS: NEVER ask for, accept, or store passwords, logins, or API keys.
+  If the user offers one, politely refuse: explain you can't take passwords in
+  chat, and offer the secure path instead — the platform's own login/OAuth, or
+  request_data_feed_connection so GYBs wires it during setup. No credential
+  fields exist on any tool; never invent them.
+- When the business is named and at least one route, truck, and team member
+  exist (or the user explicitly declines to add more), call
+  complete_onboarding, congratulate them, and summarize what was set up.
+  Mention they can change anything later by just chatting, or use MENU →
+  Setup guide for the manual step-by-step wizard.
+- If the user goes off-topic, answer briefly and steer back to the interview.`
+    : "";
 
   return `You are the TruckCEO in-app AI assistant — the operational brain for a bread-route distribution business in CT / lower NY.
 
@@ -799,6 +1265,7 @@ HARD RULES — never break these:
 7. When you take an action (log a note, create an alert, update a status), confirm what you did in one line.
 8. Stratford Flowers route 7823 is currently VACANT (driver departed) — don't attribute a driver to it.
 9. LANGUAGE: the user may write in English or Spanish — many drivers are Spanish-speaking. Always detect the user's language and respond ENTIRELY in that same language. Be natural and conversational in both; never mix languages in one reply unless the user does.
+${setupSection}
 
 TOOLS: use them for live data (routes, scores, EOD, alerts) and for writes. You can chain multiple tool calls. After tool results, answer in natural language.`;
 }
@@ -812,10 +1279,11 @@ async function runAssistantTurn(
   brain: any,
   threadId: string,
   history: Array<{ role: "user" | "model"; text: string }>,
-  message: string
+  message: string,
+  setupMode: boolean
 ): Promise<TurnResult> {
   const scoped = buildScopedContext(ctx, brain);
-  const systemInstruction = buildSystemPrompt(ctx, brain, scoped);
+  const systemInstruction = buildSystemPrompt(ctx, brain, scoped, setupMode);
 
   const turn = await provider.runTurn({
     apiKey,
@@ -922,11 +1390,24 @@ export const askAssistant = onRequest(
       return;
     }
 
-    const { message, threadId: clientThreadId } = req.body || {};
+    const { message, threadId: clientThreadId, setupMode: clientSetupMode } = req.body || {};
     if (!message || !String(message).trim()) {
       res.status(400).json({ error: "Message is required." });
       return;
     }
+
+    // Setup mode is an owner-only interview flow: the frontend passes
+    // setupMode=true when an owner signs in with incomplete setup. Never
+    // honor it for other roles (it unlocks owner-only write tools).
+    const setupMode = clientSetupMode === true && ctx.role === "owner";
+    // The frontend auto-opens the panel and sends this trigger so the
+    // assistant greets the owner and starts the interview. Map it to a clean
+    // instruction so the raw marker never lands in thread history.
+    const SETUP_TRIGGER = "__setup_start__";
+    const effectiveMessage =
+      String(message).trim() === SETUP_TRIGGER && setupMode
+        ? "Start the guided setup interview."
+        : String(message);
 
     try {
       // Brain
@@ -990,7 +1471,7 @@ export const askAssistant = onRequest(
       }
       const history = await loadThreadHistory(bid, threadId);
 
-      await saveThreadMessage(bid, threadId, "user", String(message));
+      await saveThreadMessage(bid, threadId, "user", effectiveMessage);
 
       // Turn
       // Gemini is primary; OpenAI is the provisioned backup. If the primary
@@ -1008,7 +1489,8 @@ export const askAssistant = onRequest(
           brain,
           threadId,
           history,
-          String(message)
+          effectiveMessage,
+          setupMode
         );
       } catch (e: any) {
         const status = e?.status ?? e?.error?.code;
@@ -1028,7 +1510,8 @@ export const askAssistant = onRequest(
           brain,
           threadId,
           history,
-          String(message)
+          effectiveMessage,
+          setupMode
         );
         providerName = "openai";
         modelName = fbModel;
