@@ -78,6 +78,23 @@ export interface SaleAlert {
   contactName: string;
 }
 
+// Operational alerts (truck issues, store problems, staffing gaps) — the
+// canonical store written by the assistant backend at
+// businesses/{bid}/alerts. Distinct from SaleAlert (promo requests).
+export interface OperationalAlert {
+  id: string;
+  title: string;
+  detail: string;
+  severity: 'info' | 'warning' | 'urgent';
+  routeId?: string | null;
+  routeNumber?: string | null;
+  status: 'open' | 'acknowledged' | 'resolved';
+  createdBy?: string;
+  createdByName?: string;
+  createdAt?: any;
+  via?: string;
+}
+
 export interface Store {
   id: string;
   name: string;
@@ -90,6 +107,9 @@ export interface RouteTerritory {
   stores: Store[];
   assignedDriverId?: string | null;
   assignedTruckId?: string | null;
+  // Optional bakery route number (e.g. "2080"). The assistant matches routes
+  // by this first, then by name. Set at creation; editable in Routes management.
+  routeNumber?: string;
 }
 
 export type View = 'dashboard' | 'ordering' | 'team' | 'fleet' | 'fleet_assign' | 'promos' | 'data_hub' | 'weather' | 'navigation' | 'settings' | 'routes_management';
@@ -119,6 +139,18 @@ export interface DriverEod {
   submittedAt: any;
   submittedBy: string;
   driverName: string;
+  // Notes appended by the assistant (log_eod_note) — additive only, the
+  // driver's own submit must never wipe these (DriverHome uses merge:true).
+  assistantNotes?: EodAssistantNote[];
+}
+
+export interface EodAssistantNote {
+  text: string;
+  by: string;
+  byName: string;
+  at: string;
+  via: string;
+  threadId?: string;
 }
 
 export type PhotoMoment = 'start' | 'work' | 'end';

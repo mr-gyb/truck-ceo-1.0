@@ -20,6 +20,7 @@ import { TruckCeoAgent } from './components/TruckCeoAgent';
 import { TruckNavigation } from './components/TruckNavigation';
 import { UserSettings } from './components/UserSettings';
 import { RoutesManagement } from './components/RoutesManagement';
+import { OnboardingWizard } from './components/OnboardingWizard';
 import { SaleAlertFormModal } from './components/forms/SaleAlertFormModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { ToastContainer } from './components/ToastContainer';
@@ -37,6 +38,34 @@ const AppContent: React.FC = () => {
   const [navTruckId, setNavTruckId] = useState<string | null>(null);
   const [previewRoute, setPreviewRoute] = useState<RouteTerritory | null>(null);
   const [previewPickerOpen, setPreviewPickerOpen] = useState(false);
+
+  // Welcome onboarding state (owner only).
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [wizardSkippedThisSession, setWizardSkippedThisSession] = useState(false);
+  const [setupCompleted, setSetupCompleted] = useState(false);
+
+  // Auto-open the setup wizard for owners who haven't finished onboarding and
+  // are missing core data (routes, trucks, or team). "Skip for now" is sticky
+  // for the session so it never reopens until the next sign-in.
+  useEffect(() => {
+    if (authLoading || dataLoading || !currentUser || !userProfile) return;
+    if (userProfile.role !== 'business_owner') return;
+    if (userProfile.onboardingCompleted === true || setupCompleted) return;
+    if (wizardSkippedThisSession || wizardOpen) return;
+    const missingData = routes.length === 0 || trucks.length === 0 || employees.length === 0;
+    if (missingData) setWizardOpen(true);
+  }, [
+    authLoading, dataLoading, currentUser, userProfile,
+    routes.length, trucks.length, employees.length,
+    setupCompleted, wizardSkippedThisSession, wizardOpen,
+  ]);
+
+  const showSetupBanner =
+    !!userProfile &&
+    userProfile.role === 'business_owner' &&
+    userProfile.onboardingCompleted !== true &&
+    !setupCompleted &&
+    !wizardOpen;
 
   const startNavigation = (truckId: string) => {
     setNavTruckId(truckId);
@@ -162,7 +191,29 @@ const AppContent: React.FC = () => {
       activeView={activeView}
       onViewChange={setActiveView}
       floating={activeView === 'dashboard' ? <TruckCeoAgent /> : null}
+      onSetupGuide={() => setWizardOpen(true)}
     >
+      {showSetupBanner && (
+        <button
+          onClick={() => setWizardOpen(true)}
+          className="w-full mb-4 bg-black text-left rounded-[1.8rem] p-5 flex items-center gap-4 active:scale-[0.98] transition-all shadow-xl"
+        >
+          <span className="w-11 h-11 bg-[#FFD700] rounded-2xl flex items-center justify-center shrink-0">
+            <i className="fas fa-clipboard-check text-black text-lg"></i>
+          </span>
+          <span className="flex-1">
+            <span className="block text-white font-black uppercase tracking-widest text-xs">
+              Complete setup
+            </span>
+            <span className="block text-gray-400 text-[10px] font-bold uppercase tracking-widest mt-1">
+              {routes.length === 0 || trucks.length === 0 || employees.length === 0
+                ? 'Add your routes, trucks, and team to unlock live ops'
+                : 'Finish the guided setup'}
+            </span>
+          </span>
+          <i className="fas fa-arrow-right text-[#FFD700]"></i>
+        </button>
+      )}
       {renderContent()}
       {previewPickerOpen && (
         <DriverPreviewPicker
@@ -171,6 +222,15 @@ const AppContent: React.FC = () => {
           onSelect={(r) => {
             setPreviewPickerOpen(false);
             setPreviewRoute(r);
+          }}
+        />
+      )}
+      {wizardOpen && (
+        <OnboardingWizard
+          onDone={(completed) => {
+            setWizardOpen(false);
+            if (completed) setSetupCompleted(true);
+            else setWizardSkippedThisSession(true);
           }}
         />
       )}

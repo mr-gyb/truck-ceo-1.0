@@ -72,6 +72,15 @@ service cloud.firestore {
         allow write: if false;
       }
 
+      // Operational alerts (truck issues, store problems, staffing gaps):
+      // canonical store written by the assistant backend via Admin SDK.
+      // Business members can read them for display; only owners manage them
+      // in-app. (Also covered by the wildcard below; stated explicitly.)
+      match /alerts/{aid} {
+        allow read: if isAuthed() && myBusiness() == bid;
+        allow write: if isAuthed() && myBusiness() == bid && myProfile().role == 'business_owner';
+      }
+
       match /{subcollection=**} {
         allow read, write: if isAuthed() && myBusiness() == bid
           && subcollection[0] != 'assistantThreads'
