@@ -24,6 +24,7 @@ const ASSISTANT_URL =
 export interface AssistantToolCall {
   name: string;
   result: string;
+  ok?: boolean;
 }
 
 export interface AssistantResponse {
