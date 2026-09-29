@@ -4,11 +4,11 @@ import { BUSINESS_NAME } from '../constants';
 
 type Step = 'choose' | 'owner' | 'driver';
 
-export const RolePicker: React.FC = () => {
+export const RolePicker: React.FC<{ initialInviteCode?: string | null }> = ({ initialInviteCode }) => {
   const { pendingName, completeOwnerSignup, completeDriverJoin, logout } = useAuth();
-  const [step, setStep] = useState<Step>('choose');
+  const [step, setStep] = useState<Step>(initialInviteCode ? 'driver' : 'choose');
   const [businessName, setBusinessName] = useState('');
-  const [inviteCode, setInviteCode] = useState('');
+  const [inviteCode, setInviteCode] = useState(initialInviteCode ?? '');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
