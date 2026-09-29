@@ -76,15 +76,38 @@ function detectReplyLang(text: string): 'es-US' | 'en-US' {
   return 'en-US';
 }
 
-export const TruckCeoAgent: React.FC = () => {
+export interface TruckCeoAgentProps {
+  /**
+   * Setup mode: the owner signed in with incomplete setup. The panel
+   * auto-opens (via autoOpenKey) and the assistant runs the guided onboarding
+   * interview. Every message is sent with the setupMode flag so the backend
+   * uses the setup system prompt.
+   */
+  setupMode?: boolean;
+  /** Increment to auto-open the panel (used for setup-mode sign-in). */
+  autoOpenKey?: number;
+  /** Fired when the user closes the panel while setupMode is active. */
+  onSetupDismiss?: () => void;
+  /** Fired when the assistant completes onboarding via the complete_onboarding tool. */
+  onSetupComplete?: () => void;
+}
+
+export const TruckCeoAgent: React.FC<TruckCeoAgentProps> = ({
+  setupMode = false,
+  autoOpenKey = 0,
+  onSetupDismiss,
+  onSetupComplete,
+}) => {
   const { userProfile } = useAuth();
   const role = userProfile?.role;
   const businessId = userProfile?.businessId;
 
   const [isOpen, setIsOpen] = useState(false);
   const [input, setInput] = useState('');
-  const [messages, setMessages] = useState<Message[]>([
-    { role: 'agent', text: "Welcome back, Mateo. I'm your TruckCEO Command AI. How can I assist with your routes or team today?" }
+  const [messages, setMessages] = useState<Message[]>(() => [
+    setupMode
+      ? { role: 'agent', text: "Getting your setup interview ready — one moment…" }
+      : { role: 'agent', text: "Welcome back, Mateo. I'm your TruckCEO Command AI. How can I assist with your routes or team today?" }
   ]);
   const [isTyping, setIsTyping] = useState(false);
   const [threadId, setThreadId] = useState<string | undefined>(undefined);
@@ -173,6 +196,27 @@ export const TruckCeoAgent: React.FC = () => {
     setThreadId(undefined);
   }, [businessId]);
 
+  // Setup mode: auto-open the panel once when App bumps autoOpenKey.
+  const autoOpenedRef = useRef(false);
+  useEffect(() => {
+    if (autoOpenKey > 0 && !autoOpenedRef.current) {
+      autoOpenedRef.current = true;
+      setIsOpen(true);
+    }
+  }, [autoOpenKey]);
+
+  // Setup mode: once the panel is open, send a silent trigger so the
+  // assistant greets the owner and starts the interview. The trigger text
+  // never appears in the chat UI (backend maps it to a clean instruction).
+  const setupGreetedRef = useRef(false);
+  useEffect(() => {
+    if (setupMode && isOpen && !setupGreetedRef.current) {
+      setupGreetedRef.current = true;
+      void handleSendText('__setup_start__', { silent: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [setupMode, isOpen]);
+
   // Autoplay policy: speechSynthesis needs a prior user gesture on the page.
   useEffect(() => {
     const mark = () => {
@@ -207,6 +251,14 @@ export const TruckCeoAgent: React.FC = () => {
     }
     setIsSpeaking(false);
   }, [speechSupported]);
+
+  const closePanel = useCallback(() => {
+    stopSpeaking();
+    setIsOpen(false);
+    // Closing during the setup interview dismisses setup for this session —
+    // App stops auto-opening and the banner/wizard stay as the fallback path.
+    if (setupMode) onSetupDismiss?.();
+  }, [stopSpeaking, setupMode, onSetupDismiss]);
 
   // Pick a voice matching the detected reply language, falling back to the
   // user's language toggle, then the browser default.
@@ -276,17 +328,18 @@ export const TruckCeoAgent: React.FC = () => {
     }
   };
 
-  const handleSendText = async (overrideText?: string) => {
+  const handleSendText = async (overrideText?: string, opts?: { silent?: boolean }) => {
     const userMsg = (overrideText ?? input).trim();
     if (!userMsg || isTyping) return;
     setInput('');
     stopSpeaking(); // a new message silences any in-flight reply
-    setMessages(prev => [...prev, { role: 'user', text: userMsg }]);
+    if (!opts?.silent) {
+      setMessages(prev => [...prev, { role: 'user', text: userMsg }]);
+    }
     setIsTyping(true);
 
     try {
-      const response = await sendAssistantMessage(userMsg, threadId);
-      setThreadId(response.threadId || threadId);
+      const response = await sendAssistantMessage(userMsg, threadId, { setupMode });
 
       const next: Message[] = [];
       for (const tc of response.toolCalls) {
@@ -303,6 +356,16 @@ export const TruckCeoAgent: React.FC = () => {
         next.push({ role: 'agent', text: response.text });
       }
       setMessages(prev => [...prev, ...next]);
+
+      setThreadId(response.threadId || threadId);
+
+      // Setup interview finished — the backend ran complete_onboarding.
+      if (
+        setupMode &&
+        response.toolCalls.some(tc => tc.name === 'complete_onboarding')
+      ) {
+        onSetupComplete?.();
+      }
 
       // Speak the reply aloud (respects speaker toggle + autoplay policy).
       const speakable = response.text
@@ -389,8 +452,8 @@ export const TruckCeoAgent: React.FC = () => {
     <>
       <button
         onClick={() => {
-          if (isOpen) stopSpeaking();
-          setIsOpen(!isOpen);
+          if (isOpen) closePanel();
+          else setIsOpen(true);
         }}
         className="absolute bottom-24 right-6 w-16 h-16 bg-[#FFD700] text-black rounded-full shadow-[0_10px_30px_rgba(255,215,0,0.3)] flex items-center justify-center z-[100] transition-all hover:scale-110 active:scale-95 group border-4 border-black/5"
       >
@@ -427,7 +490,7 @@ export const TruckCeoAgent: React.FC = () => {
                   <i className={`fas ${speakerOn ? 'fa-volume-up' : 'fa-volume-mute'} text-sm ${isSpeaking ? 'animate-pulse' : ''}`}></i>
                 </button>
               )}
-              <button onClick={() => { stopSpeaking(); setIsOpen(false); }} className="text-gray-500 hover:text-white transition-colors">
+              <button onClick={closePanel} className="text-gray-500 hover:text-white transition-colors">
                 <i className="fas fa-chevron-down"></i>
               </button>
             </div>
