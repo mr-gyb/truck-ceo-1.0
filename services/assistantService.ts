@@ -52,10 +52,14 @@ async function getIdToken(): Promise<string> {
  * Send one chat message to the backend brain service.
  * Returns the assistant's reply, any tool-call confirmations, the thread id,
  * and whether the request was escalated to GYBs.
+ *
+ * Pass `opts.setupMode` when the owner is in the guided setup interview —
+ * the backend switches to the setup system prompt (owner-only write tools).
  */
 export async function sendAssistantMessage(
   message: string,
-  threadId?: string
+  threadId?: string,
+  opts?: { setupMode?: boolean }
 ): Promise<AssistantResponse> {
   const token = await getIdToken();
 
@@ -65,7 +69,11 @@ export async function sendAssistantMessage(
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify({ message, threadId: threadId ?? null }),
+    body: JSON.stringify({
+      message,
+      threadId: threadId ?? null,
+      setupMode: opts?.setupMode === true,
+    }),
   });
 
   if (!res.ok) {
