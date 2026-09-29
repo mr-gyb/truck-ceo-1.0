@@ -10,7 +10,7 @@ import {
   where
 } from 'firebase/firestore';
 import { db } from './firebaseConfig';
-import { Product, Employee, Truck, SaleAlert, RouteTerritory } from '../types';
+import { Product, Employee, Truck, SaleAlert, RouteTerritory, OperationalAlert } from '../types';
 
 export class FirestoreService {
   constructor(private businessId: string) {}
@@ -150,5 +150,14 @@ export class FirestoreService {
 
   async deleteSaleAlert(alertId: string): Promise<void> {
     await deleteDoc(doc(db, `businesses/${this.businessId}/saleAlerts`, alertId));
+  }
+
+  // ===== OPERATIONAL ALERTS =====
+  // Canonical store for operational alerts (truck issues, store problems,
+  // staffing gaps) at businesses/{bid}/alerts. Written by the assistant
+  // backend via Admin SDK; the app reads them here.
+  async getOperationalAlerts(): Promise<OperationalAlert[]> {
+    const snapshot = await getDocs(collection(db, `businesses/${this.businessId}/alerts`));
+    return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as OperationalAlert));
   }
 }
