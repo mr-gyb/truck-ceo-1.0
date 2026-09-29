@@ -836,8 +836,8 @@ export const askAssistant = onRequest(
         res.status(503).json({ error: "Assistant is temporarily unavailable." });
         return;
       }
-      const model = PROVIDER_MODELS[MODEL_PROVIDER];
-
+      // Model: env override wins so a future model retirement never needs a code change.
+      const model = process.env.MODEL_NAME || PROVIDER_MODELS[MODEL_PROVIDER];
       // Thread
       const threadId =
         clientThreadId ||
