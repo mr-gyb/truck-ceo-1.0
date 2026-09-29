@@ -50,6 +50,9 @@ interface UserCtx {
   businessIds: string[];
   routeIds: string[];
   name: string;
+  // Employee document id under businesses/{bid}/employees (drivers only).
+  // NEVER use the Firebase UID as an employee id — see execUpdateEmployeeStatus.
+  employeeId?: string;
 }
 
 interface ToolResult {
@@ -110,8 +113,8 @@ function redactBrainForMember(brain: any, ctx: UserCtx): any {
   return redacted;
 }
 
-
-;async function getUserCtx(req: any): Promise<UserCtx | null> {
+// ─── Auth / user context / rate limit ──────────────────────────────────────
+async function getUserCtx(req: any): Promise<UserCtx | null> {
   const authz = req.headers.authorization || "";
   const m = authz.match(/^Bearer (.+)$/);
   if (!m) return null;
@@ -138,7 +141,7 @@ function redactBrainForMember(brain: any, ctx: UserCtx): any {
   else return null;
   const businessIds: string[] = [];
   if (typeof u.businessId === "string" && u.businessId) businessIds.push(u.businessId);
-  if (Array.isArray(u.businessIds)) { 
+  if (Array.isArray(u.businessIds)) {
     for (const b of u.businessIds) {
       if (typeof b === "string" && b && !businessIds.includes(b)) businessIds.push(b);
     }
@@ -152,12 +155,15 @@ function redactBrainForMember(brain: any, ctx: UserCtx): any {
     businessIds,
     routeIds,
     name: u.displayName || u.name || decoded.name || "there",
+    employeeId:
+      typeof u.employeeId === "string" && u.employeeId ? u.employeeId : undefined,
   };
-  }
-  async function checkRateLimit(uid: string): Promise<boolean> {
+}
+
+async function checkRateLimit(uid: string): Promise<boolean> {
   const ref = db.collection("assistantRateLimits").doc(uid);
-   const now = Date.now();
-  const snap = await ref.get();    
+  const now = Date.now();
+  const snap = await ref.get();
   let entry = snap.exists ? (snap.data() as any) : { count: 0, windowStart: now };
   if (now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
     entry = { count: 0, windowStart: now };
@@ -167,10 +173,12 @@ function redactBrainForMember(brain: any, ctx: UserCtx): any {
   return entry.count <= RATE_LIMIT_MAX;
 }
 
-function assertRouteAccess(ctx: UserCtx, routeId: string | undefined): boolean {
-  if (!routeId) return true; // tool decides scoping
+function assertRouteAccess(ctx: UserCtx, routeDocId: string | null | undefined): boolean {
   if (ctx.role === "owner") return true;
-  return ctx.routeIds.includes(routeId);
+  // Drivers/managers: the route must be one of their assigned route doc ids.
+  // A null doc id means the route couldn't be matched to business data — deny.
+  if (!routeDocId) return false;
+  return ctx.routeIds.includes(routeDocId);
 }
 
 // ─── Route identity resolution ─────────────────────────────────────────────
@@ -188,6 +196,63 @@ async function resolveRoute(brain: any, input: string | undefined): Promise<any 
     if (q.length >= 3 && hay.includes(q)) return { number: num, ...r };
   }
   return null;
+}
+
+// ─── Route identity resolution (brain + Firestore) ──────────────────────────
+interface ResolvedRoute {
+  number: string; // brain route number, e.g. "2080"
+  docId: string | null; // businesses/{bid}/routes doc id (ct-1 style), null when unmatched
+  name: string | null; // Firestore route name
+  brain: any; // brain route record
+}
+
+/**
+ * Resolve a user-supplied route reference (number, territory, driver name) to
+ * the brain record AND the matching Firestore route document.
+ *
+ * Route docs carry no routeNumber field (see RouteFormModal), so matching is:
+ *   1. doc.data().routeNumber == number (when the field exists)
+ *   2. doc id == number
+ *   3. doc name contains the number's digits (>= 3 digits)
+ *   4. doc name contains the brain territory (case-insensitive)
+ */
+async function resolveRouteDoc(
+  ctx: UserCtx,
+  brain: any,
+  input: string | undefined
+): Promise<ResolvedRoute | null> {
+  const route = await resolveRoute(brain, input);
+  if (!route) return null;
+  const number = String(route.number);
+  const bid = ctx.businessIds[0];
+  let docId: string | null = null;
+  let name: string | null = null;
+  if (bid) {
+    try {
+      const snap = await db.collection(`businesses/${bid}/routes`).get();
+      const digits = number.replace(/\D/g, "");
+      const territory = String(route.territory || "").toLowerCase();
+      for (const d of snap.docs) {
+        const data = d.data() as any;
+        const rn = data.routeNumber != null ? String(data.routeNumber) : "";
+        const nm = String(data.name || "");
+        const nmLower = nm.toLowerCase();
+        if (
+          d.id === number ||
+          (rn !== "" && (rn === number || rn.replace(/\D/g, "") === digits)) ||
+          (digits.length >= 3 && nm.replace(/\D/g, "").includes(digits)) ||
+          (territory.length >= 3 && nmLower.includes(territory))
+        ) {
+          docId = d.id;
+          name = nm || null;
+          break;
+        }
+      }
+    } catch (e) {
+      logger.warn("resolveRouteDoc: routes read failed", e);
+    }
+  }
+  return { number, docId, name, brain: route };
 }
 
 // ─── Tools (provider-neutral definitions) ──────────────────────────────────
@@ -314,16 +379,25 @@ const TOOLS: NeutralTool[] = [
 async function execBusinessOverview(ctx: UserCtx, brain: any): Promise<ToolResult> {
   const b = redactBrainForMember(brain, ctx);
   const businesses = b.businesses || {};
-  const routes = b.routes || {};
-  const routeNums = Object.keys(routes);
-  const visibleRoutes =
-    ctx.role === "owner" ? routeNums : routeNums.filter((n) => ctx.routeIds.includes(n));
+  const bid = ctx.businessIds[0];
+  let routeCount = 0;
+  let driverCount: number | null = null;
   let openAlerts = 0;
-  try {
-    const snap = await db.collection("alerts").where("status", "==", "open").get();
-    openAlerts = snap.size;
-  } catch (e) {
-    logger.warn("execBusinessOverview: alerts read failed", e);
+  if (bid) {
+    try {
+      const [rSnap, eSnap, aSnap] = await Promise.all([
+        db.collection(`businesses/${bid}/routes`).get(),
+        db.collection(`businesses/${bid}/employees`).get(),
+        db.collection(`businesses/${bid}/alerts`).where("status", "==", "open").get(),
+      ]);
+      routeCount = rSnap.docs.filter(
+        (d) => ctx.role === "owner" || ctx.routeIds.includes(d.id)
+      ).length;
+      driverCount = eSnap.docs.filter((d) => (d.data() as any).role === "driver").length;
+      openAlerts = aSnap.size;
+    } catch (e) {
+      logger.warn("execBusinessOverview: Firestore read failed", e);
+    }
   }
   return {
     ok: true,
@@ -333,10 +407,10 @@ async function execBusinessOverview(ctx: UserCtx, brain: any): Promise<ToolResul
         name: x.name,
         bakery: x.bakery,
       })),
-      routeCount: visibleRoutes.length,
+      routeCount,
       weeklyBaseline: b.weeklyBaseline || null,
       openAlerts,
-      driverCount: b.drivers ? Object.keys(b.drivers).length : null,
+      driverCount,
       note: "Financials are baseline-level until bakery settlement feeds connect.",
     },
   };
@@ -347,37 +421,41 @@ async function execRouteSummary(
   brain: any,
   args: any
 ): Promise<ToolResult> {
-  const route = await resolveRoute(brain, args.route);
+  const route = await resolveRouteDoc(ctx, brain, args.route);
   if (!route) return { ok: false, error: `Couldn't find a route matching "${args.route}".` };
-  if (!assertRouteAccess(ctx, route.number)) {
+  if (!assertRouteAccess(ctx, route.docId)) {
     return { ok: false, error: "You don't have access to that route." };
   }
+  const bid = ctx.businessIds[0];
   const b = redactBrainForMember(brain, ctx);
   const brainRoute = (b.routes || {})[route.number] || {};
-  // recent EOD notes
+  // recent EOD reports — the app's real collection
   let eod: any[] = [];
-  try {
-    const snap = await db
-      .collection("eodReports")
-      .where("routeId", "==", route.number)
-      .orderBy("createdAt", "desc")
-      .limit(3)
-      .get();
-    eod = snap.docs.map((d) => d.data());
-  } catch (e) {
-    logger.warn("execRouteSummary: eod read failed", e);
+  if (bid && route.docId) {
+    try {
+      const snap = await db
+        .collection(`businesses/${bid}/routes/${route.docId}/eod`)
+        .orderBy("date", "desc")
+        .limit(3)
+        .get();
+      eod = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    } catch (e) {
+      logger.warn("execRouteSummary: eod read failed", e);
+    }
   }
-  // open alerts for route
+  // open operational alerts for route
   let alerts: any[] = [];
-  try {
-    const snap = await db
-      .collection("alerts")
-      .where("status", "==", "open")
-      .where("routeId", "==", route.number)
-      .get();
-    alerts = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-  } catch (e) {
-    logger.warn("execRouteSummary: alerts read failed", e);
+  if (bid) {
+    try {
+      let q: admin.firestore.Query = db
+        .collection(`businesses/${bid}/alerts`)
+        .where("status", "==", "open");
+      if (route.docId) q = q.where("routeId", "==", route.docId);
+      const snap = await q.get();
+      alerts = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    } catch (e) {
+      logger.warn("execRouteSummary: alerts read failed", e);
+    }
   }
   return {
     ok: true,
@@ -388,6 +466,7 @@ async function execRouteSummary(
       business: brainRoute.business,
       truck: brainRoute.truck,
       vacant: !!brainRoute.vacant,
+      routeDocId: route.docId,
       recentEod: eod,
       openAlerts: alerts,
     },
@@ -406,32 +485,35 @@ function scoreComponents() {
 }
 
 async function execDriverScore(ctx: UserCtx, brain: any, args: any): Promise<ToolResult> {
-  const route = await resolveRoute(brain, args.route);
+  const route = await resolveRouteDoc(ctx, brain, args.route);
   if (!route) return { ok: false, error: `Couldn't find a route matching "${args.route}".` };
-  if (!assertRouteAccess(ctx, route.number)) {
+  if (!assertRouteAccess(ctx, route.docId)) {
     return { ok: false, error: "You don't have access to that route." };
   }
+  const bid = ctx.businessIds[0];
   // Data discipline: EOD completion rate for the route over last 14 days.
   let discipline: any = { status: "no_data" };
-  try {
-    const since = new Date();
-    since.setDate(since.getDate() - 14);
-    const snap = await db
-      .collection("eodReports")
-      .where("routeId", "==", route.number)
-      .where("createdAt", ">=", since)
-      .get();
-    const days = snap.size;
-    const score = Math.min(100, Math.round((days / 12) * 100)); // ~6-day weeks
-    discipline = { status: "ok", eodReportsLast14d: days, componentScore: score };
-  } catch (e) {
-    logger.warn("execDriverScore: eod read failed", e);
+  if (bid && route.docId) {
+    try {
+      const since = new Date();
+      since.setDate(since.getDate() - 14);
+      const sinceId = since.toISOString().slice(0, 10); // yyyy-mm-dd, string-comparable
+      const snap = await db
+        .collection(`businesses/${bid}/routes/${route.docId}/eod`)
+        .where("date", ">=", sinceId)
+        .get();
+      const days = snap.size;
+      const score = Math.min(100, Math.round((days / 12) * 100)); // ~6-day weeks
+      discipline = { status: "ok", eodReportsLast14d: days, componentScore: score };
+    } catch (e) {
+      logger.warn("execDriverScore: eod read failed", e);
+    }
   }
   return {
     ok: true,
     data: {
       routeNumber: route.number,
-      driver: route.driver,
+      driver: route.brain.driver,
       week: args.week || "current",
       components: scoreComponents(),
       dataDiscipline: discipline,
@@ -442,17 +524,20 @@ async function execDriverScore(ctx: UserCtx, brain: any, args: any): Promise<Too
 
 async function execEodHistory(ctx: UserCtx, _brain: any, args: any): Promise<ToolResult> {
   const brain = await loadBrain();
-  const route = await resolveRoute(brain, args.route);
+  const route = await resolveRouteDoc(ctx, brain, args.route);
   if (!route) return { ok: false, error: `Couldn't find a route matching "${args.route}".` };
-  if (!assertRouteAccess(ctx, route.number)) {
+  if (!assertRouteAccess(ctx, route.docId)) {
     return { ok: false, error: "You don't have access to that route." };
+  }
+  const bid = ctx.businessIds[0];
+  if (!bid || !route.docId) {
+    return { ok: false, error: "That route isn't linked to business data yet." };
   }
   const limit = Math.min(Math.max(parseInt(args.limit) || 5, 1), 14);
   try {
     const snap = await db
-      .collection("eodReports")
-      .where("routeId", "==", route.number)
-      .orderBy("createdAt", "desc")
+      .collection(`businesses/${bid}/routes/${route.docId}/eod`)
+      .orderBy("date", "desc")
       .limit(limit)
       .get();
     return { ok: true, data: { routeNumber: route.number, reports: snap.docs.map((d) => ({ id: d.id, ...d.data() })) } };
@@ -463,26 +548,39 @@ async function execEodHistory(ctx: UserCtx, _brain: any, args: any): Promise<Too
 }
 
 async function execOpenAlerts(ctx: UserCtx, brain: any, args: any): Promise<ToolResult> {
-  let routeNumber: string | undefined;
+  const bid = ctx.businessIds[0];
+  if (!bid) return { ok: false, error: "No business linked to your account." };
+  let routeDocId: string | null = null;
   if (args.route) {
-    const route = await resolveRoute(brain, args.route);
+    const route = await resolveRouteDoc(ctx, brain, args.route);
     if (!route) return { ok: false, error: `Couldn't find a route matching "${args.route}".` };
-    if (!assertRouteAccess(ctx, route.number)) {
+    if (!assertRouteAccess(ctx, route.docId)) {
       return { ok: false, error: "You don't have access to that route." };
     }
-    routeNumber = route.number;
+    routeDocId = route.docId;
   }
+  const alerts: any[] = [];
   try {
-    let q: admin.firestore.Query = db.collection("alerts").where("status", "==", "open");
-    if (routeNumber) q = q.where("routeId", "==", routeNumber);
+    // Operational alerts — canonical store, written by create_alert.
+    let q: admin.firestore.Query = db
+      .collection(`businesses/${bid}/alerts`)
+      .where("status", "==", "open");
+    if (routeDocId) q = q.where("routeId", "==", routeDocId);
     else if (ctx.role !== "owner" && ctx.routeIds.length)
       q = q.where("routeId", "in", ctx.routeIds.slice(0, 10));
     const snap = await q.orderBy("createdAt", "desc").limit(20).get();
-    return { ok: true, data: { alerts: snap.docs.map((d) => ({ id: d.id, ...d.data() })) } };
+    for (const d of snap.docs) alerts.push({ id: d.id, kind: "operational", ...d.data() });
   } catch (e) {
-    logger.warn("execOpenAlerts: read failed", e);
-    return { ok: false, error: "Couldn't load alerts right now." };
+    logger.warn("execOpenAlerts: operational alerts read failed", e);
   }
+  try {
+    // Promo alerts — the app's saleAlerts. Included so nothing open is missed.
+    const snap = await db.collection(`businesses/${bid}/saleAlerts`).get();
+    for (const d of snap.docs) alerts.push({ id: d.id, kind: "promo", ...d.data() });
+  } catch (e) {
+    logger.warn("execOpenAlerts: saleAlerts read failed", e);
+  }
+  return { ok: true, data: { alerts: alerts.slice(0, 30) } };
 }
 
 async function execLogEodNote(
@@ -491,22 +589,28 @@ async function execLogEodNote(
   args: any,
   threadId: string
 ): Promise<ToolResult> {
-  const route = await resolveRoute(brain, args.route);
+  const route = await resolveRouteDoc(ctx, brain, args.route);
   if (!route) return { ok: false, error: `Couldn't find a route matching "${args.route}".` };
-  if (!assertRouteAccess(ctx, route.number)) {
+  if (!assertRouteAccess(ctx, route.docId)) {
     return { ok: false, error: "You don't have access to that route." };
   }
   if (!args.note || !String(args.note).trim()) {
     return { ok: false, error: "Note text is required." };
   }
+  const bid = ctx.businessIds[0];
+  if (!bid || !route.docId) {
+    return { ok: false, error: "That route isn't linked to business data yet." };
+  }
   const today = new Date().toISOString().slice(0, 10);
   try {
-    const ref = db.collection("eodReports").doc(`${route.number}_${today}`);
+    // Additive-only: arrayUnion on the app's own day doc
+    // (businesses/{bid}/routes/{rid}/eod/{yyyy-mm-dd}). Merge keeps every
+    // driver-submitted field (piecesLeft, stalesPulled, ...) intact.
+    const ref = db.collection(`businesses/${bid}/routes/${route.docId}/eod`).doc(today);
     await ref.set(
       {
-        routeId: route.number,
         date: today,
-        notes: admin.firestore.FieldValue.arrayUnion({
+        assistantNotes: admin.firestore.FieldValue.arrayUnion({
           text: String(args.note).trim(),
           by: ctx.uid,
           byName: ctx.name,
@@ -526,33 +630,40 @@ async function execLogEodNote(
 }
 
 async function execCreateAlert(ctx: UserCtx, brain: any, args: any): Promise<ToolResult> {
-  let routeNumber: string | undefined;
+  const bid = ctx.businessIds[0];
+  if (!bid) return { ok: false, error: "No business linked to your account." };
+  let routeDocId: string | null = null;
+  let routeNumber: string | null = null;
   if (args.route) {
-    const route = await resolveRoute(brain, args.route);
+    const route = await resolveRouteDoc(ctx, brain, args.route);
     if (!route) return { ok: false, error: `Couldn't find a route matching "${args.route}".` };
-    if (!assertRouteAccess(ctx, route.number)) {
+    if (!assertRouteAccess(ctx, route.docId)) {
       return { ok: false, error: "You don't have access to that route." };
     }
+    routeDocId = route.docId;
     routeNumber = route.number;
   } else if (ctx.role === "driver" && ctx.routeIds.length === 1) {
-    routeNumber = ctx.routeIds[0];
+    routeDocId = ctx.routeIds[0];
   }
   const severity = ["info", "warning", "urgent"].includes(args.severity)
     ? args.severity
     : "warning";
   try {
-    const ref = await db.collection("alerts").add({
+    // Canonical store: businesses/{bid}/alerts (operational alerts only —
+    // promo requests live in saleAlerts). The app loads this collection too.
+    const ref = await db.collection(`businesses/${bid}/alerts`).add({
       title: String(args.title).slice(0, 120),
       detail: args.detail ? String(args.detail).slice(0, 2000) : "",
       severity,
-      routeId: routeNumber || null,
+      routeId: routeDocId,
+      routeNumber,
       status: "open",
       createdBy: ctx.uid,
       createdByName: ctx.name,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       via: "assistant",
     });
-    return { ok: true, data: { alertId: ref.id, severity, routeId: routeNumber || null } };
+    return { ok: true, data: { alertId: ref.id, severity, routeId: routeDocId } };
   } catch (e) {
     logger.warn("execCreateAlert: write failed", e);
     return { ok: false, error: "Couldn't create the alert right now." };
@@ -560,11 +671,15 @@ async function execCreateAlert(ctx: UserCtx, brain: any, args: any): Promise<Too
 }
 
 async function execUpdateEmployeeStatus(ctx: UserCtx, args: any): Promise<ToolResult> {
+  const bid = ctx.businessIds[0];
+  if (!bid) return { ok: false, error: "No business linked to your account." };
   // Only owner/managers may write employee status notes; drivers may only note themselves.
-  const empRef = db.collection("employees").doc(args.employeeId);
+  // Employee identity is the employee DOCUMENT id — never the Firebase UID
+  // (users/{uid}.employeeId holds it; see getUserCtx).
+  const empRef = db.collection(`businesses/${bid}/employees`).doc(args.employeeId);
   const snap = await empRef.get();
   if (!snap.exists) return { ok: false, error: "Employee not found." };
-  if (ctx.role === "driver" && args.employeeId !== ctx.uid) {
+  if (ctx.role === "driver" && args.employeeId !== ctx.employeeId) {
     return { ok: false, error: "You can only update your own status." };
   }
   try {
@@ -596,6 +711,7 @@ async function execEscalate(ctx: UserCtx, args: any, threadId: string): Promise<
       fromUid: ctx.uid,
       fromName: ctx.name,
       fromRole: ctx.role,
+      businessId: ctx.businessIds[0] || null, // Firestore rules filter inbox reads on this
       threadId,
       status: "open",
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -724,16 +840,21 @@ async function runAssistantTurn(
 }
 
 // ─── Thread persistence ────────────────────────────────────────────────────
+// Threads live under the business so the app UI shares the exact same history:
+//   businesses/{bid}/assistantThreads/{tid}/messages
+// (see services/assistantService.ts -> loadLatestThread). Message docs use
+// `createdAt`; threads carry createdAt/updatedAt.
 async function loadThreadHistory(
+  bid: string,
   threadId: string,
   limit = 20
 ): Promise<Array<{ role: "user" | "model"; text: string }>> {
   try {
     const snap = await db
-      .collection("assistantThreads")
+      .collection(`businesses/${bid}/assistantThreads`)
       .doc(threadId)
       .collection("messages")
-      .orderBy("at", "desc")
+      .orderBy("createdAt", "desc")
       .limit(limit)
       .get();
     return snap.docs
@@ -752,12 +873,13 @@ async function loadThreadHistory(
 }
 
 async function saveThreadMessage(
+  bid: string,
   threadId: string,
   role: "user" | "assistant",
   text: string,
   extra: any = {}
 ): Promise<void> {
-  const ref = db.collection("assistantThreads").doc(threadId);
+  const ref = db.collection(`businesses/${bid}/assistantThreads`).doc(threadId);
   await ref.set(
     { updatedAt: admin.firestore.FieldValue.serverTimestamp() },
     { merge: true }
@@ -765,7 +887,7 @@ async function saveThreadMessage(
   await ref.collection("messages").add({
     role,
     text: String(text).slice(0, 8000),
-    at: admin.firestore.FieldValue.serverTimestamp(),
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
     ...extra,
   });
 }
@@ -838,34 +960,85 @@ export const askAssistant = onRequest(
       }
       // Model: env override wins so a future model retirement never needs a code change.
       const model = process.env.MODEL_NAME || PROVIDER_MODELS[MODEL_PROVIDER];
-      // Thread
-      const threadId =
-        clientThreadId ||
-        (await db.collection("assistantThreads").add({
-          uid: ctx.uid,
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        })).id;
-      const history = await loadThreadHistory(threadId);
 
-      await saveThreadMessage(threadId, "user", String(message));
+      // Thread — persisted under the business so the app UI shares the same
+      // history (services/assistantService.ts reads businesses/{bid}/assistantThreads).
+      const bid = ctx.businessIds[0];
+      if (!bid) {
+        res.status(403).json({ error: "No business is linked to your account." });
+        return;
+      }
+      let threadId: string | null =
+        typeof clientThreadId === "string" && clientThreadId ? clientThreadId : null;
+      if (threadId) {
+        // Never let a client-supplied id reach into another business's threads.
+        const tSnap = await db
+          .collection(`businesses/${bid}/assistantThreads`)
+          .doc(threadId)
+          .get();
+        if (!tSnap.exists) threadId = null;
+      }
+      if (!threadId) {
+        threadId = (
+          await db.collection(`businesses/${bid}/assistantThreads`).add({
+            uid: ctx.uid,
+            businessId: bid,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          })
+        ).id;
+      }
+      const history = await loadThreadHistory(bid, threadId);
+
+      await saveThreadMessage(bid, threadId, "user", String(message));
 
       // Turn
-      const turn = await runAssistantTurn(
-        provider,
-        apiKey,
-        model,
-        ctx,
-        brain,
-        threadId,
-        history,
-        String(message)
-      );
+      // Gemini is primary; OpenAI is the provisioned backup. If the primary
+      // fails with a transient error (429/503/500) even after its own retries,
+      // fail over to the backup once rather than failing the whole turn.
+      let turn: TurnResult;
+      let providerName = MODEL_PROVIDER;
+      let modelName = model;
+      try {
+        turn = await runAssistantTurn(
+          provider,
+          apiKey,
+          model,
+          ctx,
+          brain,
+          threadId,
+          history,
+          String(message)
+        );
+      } catch (e: any) {
+        const status = e?.status ?? e?.error?.code;
+        const transient = status === 429 || status === 503 || status === 500;
+        const fallbackKey = process.env.OPENAI_API_KEY;
+        if (!transient || MODEL_PROVIDER === "openai" || !fallbackKey) throw e;
+        logger.warn(
+          `askAssistant: primary ${MODEL_PROVIDER} failed (${status}), failing over to openai`
+        );
+        const fbProvider = getProvider("openai");
+        const fbModel = process.env.OPENAI_MODEL || PROVIDER_MODELS["openai"];
+        turn = await runAssistantTurn(
+          fbProvider,
+          fallbackKey,
+          fbModel,
+          ctx,
+          brain,
+          threadId,
+          history,
+          String(message)
+        );
+        providerName = "openai";
+        modelName = fbModel;
+      }
 
-      await saveThreadMessage(threadId, "assistant", turn.text, {
+      await saveThreadMessage(bid, threadId, "assistant", turn.text, {
         toolCalls: turn.toolCalls.map((t) => ({ name: t.name, ok: t.ok })),
         escalated: turn.escalated,
-        provider: MODEL_PROVIDER,
-        model,
+        provider: providerName,
+        model: modelName,
       });
 
       res.status(200).json({
