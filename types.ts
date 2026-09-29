@@ -30,6 +30,7 @@ export interface Employee {
   id: string;
   name: string;
   role: 'executive' | 'driver';
+  phone?: string | null;
   hoursThisWeek: number;
   engagementScore: number; // 0-100
   status: 'active' | 'break' | 'off';
@@ -87,9 +88,11 @@ export interface RouteTerritory {
   id: string;
   name: string;
   stores: Store[];
+  assignedDriverId?: string | null;
+  assignedTruckId?: string | null;
 }
 
-export type View = 'dashboard' | 'ordering' | 'team' | 'fleet' | 'promos' | 'data_hub' | 'weather' | 'navigation' | 'settings' | 'routes_management';
+export type View = 'dashboard' | 'ordering' | 'team' | 'fleet' | 'fleet_assign' | 'promos' | 'data_hub' | 'weather' | 'navigation' | 'settings' | 'routes_management';
 
 // ===== Driver app (role-based) =====
 
@@ -101,6 +104,8 @@ export interface InviteCode {
   createdBy: string;
   createdAt: any;
   usedCount: number;
+  kind?: string; // 'link' for business-level invite links vs per-route codes
+  role?: string; // 'team_member' (driver view) | 'business_manager' (business view)
 }
 
 export interface DriverEod {

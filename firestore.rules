@@ -57,9 +57,26 @@ service cloud.firestore {
         }
       }
 
+      // Invite links: business members can read; only owners create/revoke.
+      // (The recursive wildcard below excludes 'invites' so member writes
+      // can't sneak through the broader match.)
+      match /invites/{code} {
+        allow read: if isAuthed() && myBusiness() == bid;
+        allow write: if isAuthed() && myBusiness() == bid && myProfile().role == 'business_owner';
+      }
+
+      // Data-source connection status: written only by the backend function
+      // (Admin SDK bypasses rules). Clients can read the status pills.
+      match /connections/{cid} {
+        allow read: if isAuthed() && myBusiness() == bid;
+        allow write: if false;
+      }
+
       match /{subcollection=**} {
         allow read, write: if isAuthed() && myBusiness() == bid
-          && subcollection[0] != 'assistantThreads';
+          && subcollection[0] != 'assistantThreads'
+          && subcollection[0] != 'invites'
+          && subcollection[0] != 'connections';
       }
     }
 

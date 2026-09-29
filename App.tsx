@@ -13,6 +13,7 @@ import { SmartOrdering } from './components/SmartOrdering';
 import { EmployeeEngagement } from './components/EmployeeEngagement';
 import { TruckMaintenance } from './components/TruckMaintenance';
 import { DataHub } from './components/DataHub';
+import { FleetManager } from './components/FleetManager';
 import { WeatherForecast } from './components/WeatherForecast';
 import { RouteSwitcher } from './components/RouteSwitcher';
 import { TruckCeoAgent } from './components/TruckCeoAgent';
@@ -52,9 +53,13 @@ const AppContent: React.FC = () => {
     return <AuthScreen />;
   }
 
-  // New signup: ask owner vs driver before creating any profile
+  // New signup: ask owner vs driver before creating any profile.
+  // An invite link (truck-ceo.web.app/join/{code}) drops the code straight
+  // into the join step so the recipient just signs in and taps join.
   if (needsRoleSelection) {
-    return <RolePicker />;
+    const joinMatch = window.location.pathname.match(/^\/join\/([A-Za-z0-9]+)/i);
+    const initialInviteCode = joinMatch ? joinMatch[1].toUpperCase() : null;
+    return <RolePicker initialInviteCode={initialInviteCode} />;
   }
 
   // Safety net: authed but no profile (shouldn't normally happen)
@@ -101,6 +106,7 @@ const AppContent: React.FC = () => {
             onStoreChange={setCurrentStore}
             fleetCount={trucks.length}
             onPreviewAsDriver={() => setPreviewPickerOpen(true)}
+            onFleetAssign={() => setActiveView('fleet_assign')}
           />
         );
       case 'ordering':
@@ -117,6 +123,8 @@ const AppContent: React.FC = () => {
         return <EmployeeEngagement employees={employees} />;
       case 'fleet':
         return <TruckMaintenance fleet={trucks} onNavigate={startNavigation} />;
+      case 'fleet_assign':
+        return <FleetManager />;
       case 'navigation':
         return <TruckNavigation fleet={trucks} initialTruckId={navTruckId} />;
       case 'promos':
@@ -145,7 +153,7 @@ const AppContent: React.FC = () => {
       case 'routes_management':
         return <RoutesManagement />;
       default:
-        return <MainDashboard onWeatherClick={() => setActiveView('weather')} currentRoute={currentRoute} currentStore={currentStore} onRouteChange={setCurrentRoute} onStoreChange={setCurrentStore} fleetCount={trucks.length} onPreviewAsDriver={() => setPreviewPickerOpen(true)} />;
+        return <MainDashboard onWeatherClick={() => setActiveView('weather')} currentRoute={currentRoute} currentStore={currentStore} onRouteChange={setCurrentRoute} onStoreChange={setCurrentStore} fleetCount={trucks.length} onPreviewAsDriver={() => setPreviewPickerOpen(true)} onFleetAssign={() => setActiveView('fleet_assign')} />;
     }
   };
 
@@ -195,6 +203,7 @@ interface DashboardProps {
   onStoreChange: (s: Store | null) => void;
   fleetCount: number;
   onPreviewAsDriver: () => void;
+  onFleetAssign: () => void;
 }
 
 /* ---------- Owner dashboard: real driver-reported numbers ---------- */
@@ -224,7 +233,7 @@ interface ParsedEod {
   stales: number | null;
 }
 
-const MainDashboard: React.FC<DashboardProps> = ({ onWeatherClick, currentRoute, currentStore, onRouteChange, onStoreChange, fleetCount, onPreviewAsDriver }) => {
+const MainDashboard: React.FC<DashboardProps> = ({ onWeatherClick, currentRoute, currentStore, onRouteChange, onStoreChange, fleetCount, onPreviewAsDriver, onFleetAssign }) => {
   // Real live weather for the selected route territory (Open-Meteo, no key needed)
   const { days, loading: weatherLoading } = useRouteWeather(currentRoute?.name ?? null);
   const today = days.length > 0 ? days[0] : null;
@@ -406,6 +415,17 @@ const MainDashboard: React.FC<DashboardProps> = ({ onWeatherClick, currentRoute,
         >
           <i className="fas fa-eye text-lg"></i>
           Preview as driver
+        </button>
+      </section>
+
+      {/* Fleet assignment entry point */}
+      <section>
+        <button
+          onClick={onFleetAssign}
+          className="w-full py-5 bg-black text-[#FFD700] rounded-[2rem] font-black uppercase tracking-widest text-[11px] shadow-xl active:scale-95 transition-all flex items-center justify-center gap-3"
+        >
+          <i className="fas fa-truck-fast text-lg"></i>
+          Manage fleet
         </button>
       </section>
 
