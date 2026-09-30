@@ -41,6 +41,7 @@
 import { onRequest } from "firebase-functions/v2/https";
 import * as logger from "firebase-functions/logger";
 import * as admin from "firebase-admin";
+import { SecretManagerServiceClient } from "@google-cloud/secret-manager";
 import { getProvider, PROVIDER_MODELS } from "./providers";
 import type { ChatProvider, NeutralTool } from "./providers/types";
 
@@ -1366,8 +1367,12 @@ setup is incomplete. You are running the interview; they just answer.
   label/plate and which route it serves, (4) team — for each: name, role
   (driver), route; after adding a team member, READ the invite code to the
   owner and tell them to text it to that driver so they can join, (5) data
-  feeds — ask which platforms they want connected (bakery portals, telematics,
-  accounting).
+  feeds — ask which platforms they want connected. For bakery portals
+  (Bimbo ION, Flowers iPlan, Flowers IDP), direct the owner to the Data Hub:
+  each source card has a "Connect securely" button that opens the secure
+  vault form — that is the ONLY way bakery logins are collected. For
+  non-bakery platforms (telematics, accounting), use
+  request_data_feed_connection.
 - Ask ONE question at a time and wait for the answer. Keep a mental checklist;
   move on only when the current item is answered. The user may answer in
   English or Spanish — mirror their language entirely.
@@ -1391,7 +1396,10 @@ setup is incomplete. You are running the interview; they just answer.
   and never leave a declined step unrecorded.
 - CREDENTIALS: NEVER ask for, accept, or store passwords, logins, or API keys.
   If the user offers one, politely refuse: explain you can't take passwords in
-  chat, and offer the secure path instead — the platform's own login/OAuth, or
+  chat, and offer the secure path instead — for bakery portals (Bimbo ION,
+  Flowers iPlan, Flowers IDP) point them to the Data Hub "Connect securely"
+  button, which saves the login to a secure vault only GYBs can reach; for
+  other platforms use the platform's own login/OAuth, or
   request_data_feed_connection so GYBs wires it during setup. No credential
   fields exist on any tool; never invent them.
 - When the business is named, at least one route exists, and data feeds are
@@ -1719,6 +1727,155 @@ export const askAssistant = onRequest(
       logger.error("askAssistant failed", e);
       // Never leak provider internals to the client.
       res.status(500).json({ error: "Something went wrong — please try again." });
+    }
+  }
+);
+
+// ─── Secure bakery-credential vault ─────────────────────────────────────────
+/**
+ * POST /api/saveFeedCredentials — owner-only secure capture for bakery portal
+ * logins (Bimbo ION, Flowers iPlan, Flowers IDP).
+ *
+ * The credential is stored in Google Secret Manager (backend-only, readable by
+ * GYBs agent loops — never by clients). Firestore only gets a non-secret
+ * status doc at businesses/{bid}/connections/{slug} so the Data Hub can show
+ * "Pending — GYBs wiring". The password NEVER touches Firestore and is NEVER
+ * logged. Chat has no credential fields and must never accept passwords.
+ */
+const FEED_PLATFORMS: Record<string, string> = {
+  "bimbo-ion": "Bimbo ION",
+  "flowers-iplan": "Flowers iPlan",
+  "flowers-idp": "Flowers IDP Portal",
+};
+
+const secretClient = new SecretManagerServiceClient();
+
+/** Return the full resource name of the secret, creating it (automatic replication) if missing. */
+async function getOrCreateFeedSecret(secretId: string, parent: string): Promise<string> {
+  const name = `${parent}/secrets/${secretId}`;
+  try {
+    await secretClient.getSecret({ name });
+  } catch (e: any) {
+    if (e?.code === 5) {
+      // NOT_FOUND — create with automatic replication.
+      await secretClient.createSecret({
+        parent,
+        secretId,
+        secret: { replication: { automatic: {} } },
+      });
+    } else {
+      throw e;
+    }
+  }
+  return name;
+}
+
+export const saveFeedCredentials = onRequest(
+  {
+    region: "us-central1",
+    cors: true,
+    timeoutSeconds: 30,
+    memory: "256MiB",
+  },
+  async (req, res) => {
+    if (req.method !== "POST") {
+      res.status(405).json({ error: "POST only" });
+      return;
+    }
+
+    // Auth: Firebase ID token (same helper as the assistant).
+    const ctx = await getUserCtx(req);
+    if (!ctx) {
+      res.status(401).json({ error: "Sign in to connect a data feed." });
+      return;
+    }
+
+    // Owner only.
+    const denied = requireOwner(ctx);
+    if (denied) {
+      res
+        .status(403)
+        .json({ error: denied.error || "Only the business owner can connect data feeds." });
+      return;
+    }
+
+    // Rate limit.
+    if (!(await checkRateLimit(ctx.uid))) {
+      res.status(429).json({ error: "Slow down a little — try again in a few minutes." });
+      return;
+    }
+
+    const { platform, username, password } = req.body || {};
+    const label = FEED_PLATFORMS[String(platform || "")];
+    if (!label) {
+      res.status(400).json({ error: "Unknown platform." });
+      return;
+    }
+    const u = typeof username === "string" ? username.trim().slice(0, 320) : "";
+    const p = typeof password === "string" ? password.slice(0, 512) : "";
+    if (!u || !p) {
+      res.status(400).json({ error: "Username and password are required." });
+      return;
+    }
+
+    const bid = ctx.businessIds[0];
+    const slug = String(platform);
+    let projectId = process.env.GCLOUD_PROJECT || process.env.GCP_PROJECT || "";
+    if (!projectId && process.env.FIREBASE_CONFIG) {
+      try {
+        projectId = JSON.parse(process.env.FIREBASE_CONFIG).projectId || "";
+      } catch {
+        projectId = "";
+      }
+    }
+    if (!projectId) {
+      logger.error("saveFeedCredentials: no project id in environment");
+      res.status(500).json({ error: "Couldn't save the credentials right now — try again." });
+      return;
+    }
+
+    try {
+      // Secret Manager: one secret per business+platform; every save adds a
+      // new version so old credentials are rotated, never overwritten.
+      const parent = `projects/${projectId}`;
+      const secretName = await getOrCreateFeedSecret(`truckceo-feed-${bid}-${slug}`, parent);
+      await secretClient.addSecretVersion({
+        parent: secretName,
+        payload: {
+          data: Buffer.from(
+            JSON.stringify({
+              username: u,
+              password: p,
+              savedBy: ctx.uid,
+              savedAt: new Date().toISOString(),
+            }),
+            "utf8"
+          ),
+        },
+      });
+
+      // Firestore: status doc only — NEVER the password.
+      await db
+        .collection(`businesses/${bid}/connections`)
+        .doc(slug)
+        .set(
+          {
+            platform: slug,
+            label,
+            username: u,
+            status: "pending",
+            requestedBy: ctx.uid,
+            requestedAt: admin.firestore.FieldValue.serverTimestamp(),
+            secretName,
+          },
+          { merge: true }
+        );
+
+      res.status(200).json({ ok: true, platform: slug, status: "pending" });
+    } catch (e) {
+      // Log the platform only — never credential values.
+      logger.error("saveFeedCredentials failed", { platform: slug });
+      res.status(500).json({ error: "Couldn't save the credentials right now — try again." });
     }
   }
 );
