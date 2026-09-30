@@ -1623,6 +1623,30 @@ async function runAssistantTurn(
     finalText +=
       "\n\nI've handed this to GYBs — you'll see the follow-up right here in this thread.";
   }
+  // Guaranteed in-chat confirmation when setup completes (2026-09-30).
+  // The interview prompt asks the model to congratulate, but the owner
+  // reported seeing no confirmation — so the backend appends one explicitly.
+  const setupDone = turn.toolCalls.some(
+    (t) => t.name === "complete_onboarding" && t.ok
+  );
+  if (setupDone) {
+    try {
+      const p = await getSetupProgress(ctx.businessIds[0], threadId);
+      const bits = [
+        `${p.routes} ${p.routes === 1 ? "route" : "routes"}`,
+        `${p.trucks} ${p.trucks === 1 ? "truck" : "trucks"}`,
+        `${p.team} team ${p.team === 1 ? "member" : "members"}`,
+      ].join(", ");
+      finalText +=
+        `\n\nYou're all set! Thank you — your information has been saved` +
+        (p.businessName ? ` for ${p.businessName}` : "") +
+        ` (${bits}). You can change anything later by just chatting with me.`;
+    } catch (e) {
+      logger.warn("setup confirmation summary failed", e);
+      finalText +=
+        "\n\nYou're all set! Thank you — your information has been saved.";
+    }
+  }
   return { text: finalText, toolCalls: turn.toolCalls, escalated };
 }
 
