@@ -1,7 +1,7 @@
 
 import React from 'react';
 import { RouteTerritory, Store } from '../types';
-import { ROUTES } from '../constants';
+import { useData } from '../contexts/DataContext';
 
 interface RouteSwitcherProps {
   currentRoute: RouteTerritory | null;
@@ -16,6 +16,9 @@ export const RouteSwitcher: React.FC<RouteSwitcherProps> = ({
   onRouteChange,
   onStoreChange
 }) => {
+  // Live routes from this business's database — never the hardcoded seed list,
+  // so newly created routes appear immediately and no other data leaks in.
+  const { routes } = useData();
   return (
     <div className="bg-white p-6 rounded-[2.5rem] border border-gray-100 shadow-sm space-y-5">
       <div className="flex items-center gap-3 px-1">
@@ -30,13 +33,13 @@ export const RouteSwitcher: React.FC<RouteSwitcherProps> = ({
             className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl font-black text-xs uppercase tracking-widest focus:ring-2 focus:ring-[#FFD700] outline-none"
             value={currentRoute?.id || 'all'}
             onChange={(e) => {
-              const route = ROUTES.find(r => r.id === e.target.value) || null;
+              const route = routes.find(r => r.id === e.target.value) || null;
               onRouteChange(route);
               onStoreChange(null);
             }}
           >
             <option value="all">All Routes (Global View)</option>
-            {ROUTES.map(route => (
+            {routes.map(route => (
               <option key={route.id} value={route.id}>{route.name}</option>
             ))}
           </select>
