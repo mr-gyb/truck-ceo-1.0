@@ -13,6 +13,13 @@ interface DataContextType {
   loading: boolean;
   firestoreService: FirestoreService | null;
   refetchAll: () => Promise<void>;
+  // TEMPORARY diagnostic for the empty-routes investigation (remove after).
+  fetchDebug: {
+    businessId: string | null;
+    routesReturned: number;
+    error: string | null;
+    at: string;
+  } | null;
 
   // Products
   addProduct: (data: Omit<Product, 'id'>) => Promise<string>;
@@ -60,6 +67,13 @@ export const DataProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [routes, setRoutes] = useState<RouteTerritory[]>([]);
   const [loading, setLoading] = useState(true);
   const [firestoreService, setFirestoreService] = useState<FirestoreService | null>(null);
+  // TEMPORARY diagnostic for the empty-routes investigation (remove after).
+  const [fetchDebug, setFetchDebug] = useState<{
+    businessId: string | null;
+    routesReturned: number;
+    error: string | null;
+    at: string;
+  } | null>(null);
 
   const fetchData = async (service: FirestoreService) => {
     setLoading(true);
@@ -82,6 +96,12 @@ export const DataProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setRoutes(r);
         setAlerts(a);
         console.log('Loaded:', { products: p.length, employees: e.length, trucks: t.length, routes: r.length });
+        setFetchDebug({
+          businessId: (service as any).businessId ?? null,
+          routesReturned: r.length,
+          error: null,
+          at: new Date().toISOString(),
+        });
       } else if (userProfile?.role === 'team_member' && userProfile.employeeId) {
         // Team members see only their assigned routes and related data
         console.log('Fetching data for team member...');
@@ -107,6 +127,12 @@ export const DataProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     } catch (error) {
       console.error('Error fetching data:', error);
+      setFetchDebug({
+        businessId: (service as any).businessId ?? null,
+        routesReturned: -1,
+        error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+        at: new Date().toISOString(),
+      });
     } finally {
       setLoading(false);
     }
@@ -238,6 +264,7 @@ export const DataProvider: React.FC<{ children: React.ReactNode }> = ({ children
     loading,
     firestoreService,
     refetchAll,
+    fetchDebug,
     addProduct,
     updateProduct,
     deleteProduct,
