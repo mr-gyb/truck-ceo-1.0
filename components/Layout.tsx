@@ -1,8 +1,10 @@
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { View } from '../types';
 import { BUSINESS_NAME } from '../constants';
 import { useAuth } from '../contexts/AuthContext';
+import { doc, getDoc } from 'firebase/firestore';
+import { db } from '../services/firebaseConfig';
 import { ProtectedFeature } from './ProtectedFeature';
 
 interface LayoutProps {
@@ -18,6 +20,20 @@ interface LayoutProps {
 export const Layout: React.FC<LayoutProps> = ({ children, activeView, onViewChange, floating, onSetupGuide }) => {
   const { logout, userProfile } = useAuth();
   const [isBottomMenuOpen, setIsBottomMenuOpen] = useState(false);
+  // Show THIS business's real name in the header — never a hardcoded one.
+  const [businessName, setBusinessName] = useState(BUSINESS_NAME);
+  useEffect(() => {
+    const bid = userProfile?.businessId;
+    if (!bid) return;
+    getDoc(doc(db, 'businesses', bid))
+      .then((s) => {
+        if (s.exists()) {
+          const n = (s.data() as any).name;
+          if (typeof n === 'string' && n.trim()) setBusinessName(n.trim());
+        }
+      })
+      .catch(() => {});
+  }, [userProfile?.businessId]);
 
   const handleBottomMenuClick = (view: View) => {
     onViewChange(view);
@@ -38,7 +54,7 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeView, onViewChan
       <header className="bg-black text-white p-5 flex justify-between items-center shrink-0 shadow-xl z-[70]">
         <div className="flex items-center gap-2">
           <i className="fas fa-truck-fast text-[#FFD700] text-2xl"></i>
-          <h1 className="text-lg font-black tracking-tighter uppercase leading-none">{BUSINESS_NAME}</h1>
+          <h1 className="text-lg font-black tracking-tighter uppercase leading-none">{businessName}</h1>
         </div>
         <div className="flex items-center gap-5">
           <button className="text-white hover:text-[#FFD700] transition-colors relative">
