@@ -124,6 +124,59 @@ function redactBrainForMember(brain: any, ctx: UserCtx): any {
   return redacted;
 }
 
+// ─── Live business data (per-tenant Firestore reads) ───────────────────────
+// The global brain is REFERENCE data about one operation. The live route list
+// below is the ground truth for what exists in the signed-in user's business
+// RIGHT NOW — newly created routes appear here immediately, and no other
+// business's routes ever leak in.
+interface LiveRoute {
+  id: string;
+  routeNumber: string;
+  name: string;
+  bakery: string | null;
+}
+const liveRouteCache = new Map<string, { at: number; routes: LiveRoute[] }>();
+const LIVE_ROUTE_TTL_MS = 60_000;
+
+async function listLiveRoutes(bid: string): Promise<LiveRoute[]> {
+  const now = Date.now();
+  const cached = liveRouteCache.get(bid);
+  if (cached && now - cached.at < LIVE_ROUTE_TTL_MS) return cached.routes;
+  try {
+    const snap = await db.collection(`businesses/${bid}/routes`).get();
+    const routes: LiveRoute[] = snap.docs.map((d) => {
+      const x = d.data() as any;
+      return {
+        id: d.id,
+        routeNumber: String(x.routeNumber ?? ""),
+        name: String(x.name ?? ""),
+        bakery: x.bakery != null ? String(x.bakery) : null,
+      };
+    });
+    liveRouteCache.set(bid, { at: now, routes });
+    return routes;
+  } catch (e) {
+    logger.warn("listLiveRoutes: read failed", e);
+    return cached ? cached.routes : [];
+  }
+}
+
+function matchLiveRoute(routes: LiveRoute[], input: string): LiveRoute | null {
+  const raw = input.trim();
+  const q = raw.toLowerCase();
+  if (!q) return null;
+  const digits = q.replace(/\D/g, "");
+  for (const r of routes) {
+    if (r.routeNumber.toLowerCase() === q) return r;
+    if (digits && r.routeNumber.replace(/\D/g, "") === digits) return r;
+    if (r.id === raw) return r;
+  }
+  for (const r of routes) {
+    if (q.length >= 3 && r.name.toLowerCase().includes(q)) return r;
+  }
+  return null;
+}
+
 // ─── Auth / user context / rate limit ──────────────────────────────────────
 async function getUserCtx(req: any): Promise<UserCtx | null> {
   const authz = req.headers.authorization || "";
@@ -211,10 +264,11 @@ async function resolveRoute(brain: any, input: string | undefined): Promise<any 
 
 // ─── Route identity resolution (brain + Firestore) ──────────────────────────
 interface ResolvedRoute {
-  number: string; // brain route number, e.g. "2080"
-  docId: string | null; // businesses/{bid}/routes doc id (ct-1 style), null when unmatched
+  number: string; // route number, e.g. "2080" (or doc id when the doc has none)
+  docId: string | null; // businesses/{bid}/routes doc id, null when unmatched
   name: string | null; // Firestore route name
-  brain: any; // brain route record
+  brain: any; // brain route record (null when resolved from live data only)
+  live: LiveRoute | null; // the live Firestore route doc, when matched there
 }
 
 /**
@@ -232,10 +286,28 @@ async function resolveRouteDoc(
   brain: any,
   input: string | undefined
 ): Promise<ResolvedRoute | null> {
+  const bid = ctx.businessIds[0];
+  // 1) Live business routes FIRST — newly created routes resolve immediately,
+  //    and resolution never depends on the reference brain.
+  if (bid && input) {
+    const live = await listLiveRoutes(bid);
+    const m = matchLiveRoute(live, input);
+    if (m) {
+      if (!assertRouteAccess(ctx, m.id)) return null;
+      const b = redactBrainForMember(brain, ctx);
+      return {
+        number: m.routeNumber !== "" ? m.routeNumber : m.id,
+        docId: m.id,
+        name: m.name || null,
+        brain: (b.routes || {})[m.routeNumber] || null,
+        live: m,
+      };
+    }
+  }
+  // 2) Reference-brain fallback (legacy reference data only).
   const route = await resolveRoute(brain, input);
   if (!route) return null;
   const number = String(route.number);
-  const bid = ctx.businessIds[0];
   let docId: string | null = null;
   let name: string | null = null;
   if (bid) {
@@ -263,7 +335,7 @@ async function resolveRouteDoc(
       logger.warn("resolveRouteDoc: routes read failed", e);
     }
   }
-  return { number, docId, name, brain: route };
+  return { number, docId, name, brain: route, live: null };
 }
 
 // ─── Tools (provider-neutral definitions) ──────────────────────────────────
@@ -549,8 +621,9 @@ async function execRouteSummary(
     return { ok: false, error: "You don't have access to that route." };
   }
   const bid = ctx.businessIds[0];
-  const b = redactBrainForMember(brain, ctx);
-  const brainRoute = (b.routes || {})[route.number] || {};
+  // Prefer live Firestore fields; the reference brain only fills gaps.
+  const live = route.live;
+  const brainRoute = route.brain || {};
   // recent EOD reports — the app's real collection
   let eod: any[] = [];
   if (bid && route.docId) {
@@ -583,18 +656,19 @@ async function execRouteSummary(
     ok: true,
     data: {
       routeNumber: route.number,
-      territory: brainRoute.territory,
-      driver: brainRoute.driver,
-      business: brainRoute.business,
-      truck: brainRoute.truck,
+      territory: live?.name || route.name || brainRoute.territory || null,
+      bakery: live?.bakery || brainRoute.bakery || null,
+      driver: brainRoute.driver || null,
+      business: brainRoute.business || null,
+      truck: brainRoute.truck || null,
       vacant: !!brainRoute.vacant,
       routeDocId: route.docId,
       recentEod: eod,
       openAlerts: alerts,
+      source: live ? "live" : "reference",
     },
   };
 }
-
 function scoreComponents() {
   // Weights per approved Driver Score design; sales-dependent parts marked pending.
   return [
@@ -635,7 +709,7 @@ async function execDriverScore(ctx: UserCtx, brain: any, args: any): Promise<Too
     ok: true,
     data: {
       routeNumber: route.number,
-      driver: route.brain.driver,
+      driver: route.brain?.driver || null,
       week: args.week || "current",
       components: scoreComponents(),
       dataDiscipline: discipline,
@@ -967,6 +1041,8 @@ async function execCreateRoute(ctx: UserCtx, args: any): Promise<ToolResult> {
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       via: "assistant",
     });
+    // The new route must be visible to the assistant immediately.
+    liveRouteCache.delete(bid);
     return { ok: true, data: { routeId: ref.id, routeNumber, territory } };
   } catch (e) {
     logger.warn("execCreateRoute: write failed", e);
@@ -1287,63 +1363,101 @@ async function runTool(
   brain: any,
   threadId: string
 ): Promise<ToolResult> {
+  let result: ToolResult;
   switch (name) {
     case "get_business_overview":
-      return execBusinessOverview(ctx, brain);
+      result = await execBusinessOverview(ctx, brain);
+      break;
     case "get_route_summary":
-      return execRouteSummary(ctx, brain, args);
+      result = await execRouteSummary(ctx, brain, args);
+      break;
     case "get_driver_score":
-      return execDriverScore(ctx, brain, args);
+      result = await execDriverScore(ctx, brain, args);
+      break;
     case "get_eod_history":
-      return execEodHistory(ctx, brain, args);
+      result = await execEodHistory(ctx, brain, args);
+      break;
     case "get_open_alerts":
-      return execOpenAlerts(ctx, brain, args);
+      result = await execOpenAlerts(ctx, brain, args);
+      break;
     case "log_eod_note":
-      return execLogEodNote(ctx, brain, args, threadId);
+      result = await execLogEodNote(ctx, brain, args, threadId);
+      break;
     case "create_alert":
-      return execCreateAlert(ctx, brain, args);
+      result = await execCreateAlert(ctx, brain, args);
+      break;
     case "update_employee_status":
-      return execUpdateEmployeeStatus(ctx, args);
+      result = await execUpdateEmployeeStatus(ctx, args);
+      break;
     case "escalate_to_gybs":
-      return execEscalate(ctx, args, threadId);
+      result = await execEscalate(ctx, args, threadId);
+      break;
     case "get_onboarding_status":
-      return execOnboardingStatus(ctx);
+      result = await execOnboardingStatus(ctx);
+      break;
     case "update_business_profile":
-      return execUpdateBusinessProfile(ctx, args);
+      result = await execUpdateBusinessProfile(ctx, args);
+      break;
     case "create_route":
-      return execCreateRoute(ctx, args);
+      result = await execCreateRoute(ctx, args);
+      break;
     case "create_truck":
-      return execCreateTruck(ctx, args);
+      result = await execCreateTruck(ctx, args);
+      break;
     case "add_team_member":
-      return execAddTeamMember(ctx, args);
+      result = await execAddTeamMember(ctx, args);
+      break;
     case "complete_onboarding":
-      return execCompleteOnboarding(ctx, threadId);
+      result = await execCompleteOnboarding(ctx, threadId);
+      break;
     case "request_data_feed_connection":
-      return execRequestDataFeed(ctx, args);
+      result = await execRequestDataFeed(ctx, args);
+      break;
     case "skip_setup_step":
-      return execSkipSetupStep(ctx, args, threadId);
+      result = await execSkipSetupStep(ctx, args, threadId);
+      break;
     default:
-      return { ok: false, error: `Unknown tool: ${name}` };
+      result = { ok: false, error: `Unknown tool: ${name}` };
   }
+  // Observability: every tool call leaves a trace (name + outcome only —
+  // never argument values, which may contain names or other PII).
+  logger.info("assistant tool", {
+    tool: name,
+    ok: result.ok,
+    ...(result.ok ? {} : { error: result.error }),
+  });
+  return result;
 }
 
 // ─── Prompt building ───────────────────────────────────────────────────────
-function buildScopedContext(ctx: UserCtx, brain: any): any {
+async function buildScopedContext(ctx: UserCtx, brain: any): Promise<any> {
   const b = redactBrainForMember(brain, ctx);
-  const routes = b.routes || {};
-  const visible =
+  const bid = ctx.businessIds[0];
+  const live = bid ? await listLiveRoutes(bid) : [];
+  const visibleLive =
     ctx.role === "owner"
-      ? routes
-      : Object.fromEntries(
-          Object.entries(routes).filter(([n]) => ctx.routeIds.includes(n))
+      ? live
+      : live.filter(
+          (r) =>
+            ctx.routeIds.includes(r.id) ||
+            (r.routeNumber !== "" && ctx.routeIds.includes(r.routeNumber))
         );
   return {
-    businesses: b.businesses,
-    routes: visible,
-    drivers: b.drivers,
-    operatingRules: b.operatingRules,
-    flowersFormula: b.flowersFormula,
-    weeklyBaseline: b.weeklyBaseline,
+    thisBusiness: {
+      businessId: bid || null,
+      // LIVE — the actual routes in THIS business right now. This is the only
+      // source of truth for "what routes / trucks / team does this business have".
+      routes: visibleLive,
+    },
+    reference: {
+      // Background knowledge about a reference operation (formulas, operating
+      // rules, baselines). NEVER present these as belonging to this business.
+      businesses: b.businesses,
+      drivers: b.drivers,
+      operatingRules: b.operatingRules,
+      flowersFormula: b.flowersFormula,
+      weeklyBaseline: b.weeklyBaseline,
+    },
   };
 }
 
@@ -1416,8 +1530,20 @@ setup is incomplete. You are running the interview; they just answer.
 
 ${roleLine}
 
-KNOWLEDGE (authoritative, from the business brain):
-${JSON.stringify(scoped).slice(0, 12000)}
+KNOWLEDGE — two separate parts, never mix them:
+1. THIS BUSINESS — live database state for the signed-in user's business RIGHT
+   NOW. This is the ONLY source of truth for what routes, trucks, and team
+   members THIS business has:
+${JSON.stringify(scoped.thisBusiness).slice(0, 6000)}
+2. REFERENCE — background knowledge about a reference operation (formulas,
+   operating rules, baselines):
+${JSON.stringify(scoped.reference).slice(0, 8000)}
+
+CRITICAL — data honesty: the REFERENCE section describes a different/reference
+operation. NEVER present its routes, drivers, trucks, territories, or numbers
+as belonging to this business. When asked what routes, team, or trucks THIS
+business has, use ONLY section 1. If section 1 shows zero routes, say the
+business has none set up yet — never fill the gap with reference data.
 
 HARD RULES — never break these:
 1. ORDERING IS RECOMMEND-ONLY. You may suggest order quantities, but you NEVER place, change, or confirm orders. There are no order tools — if asked to place an order, explain you can only recommend and escalate_to_gybs if they insist.
@@ -1427,7 +1553,7 @@ HARD RULES — never break these:
 5. ESCALATE, don't guess: ordering decisions, money/payroll, hiring/firing, or anything uncertain → escalate_to_gybs. Say you've handed it to GYBs.
 6. Be concise, plain-spoken, and practical. This is a driver/operator audience, not analysts. Short answers, no jargon. Keep answers short enough to be read aloud comfortably — responses may be spoken back as audio.
 7. When you take an action (log a note, create an alert, update a status), confirm what you did in one line.
-8. Stratford Flowers route 7823 is currently VACANT (driver departed) — don't attribute a driver to it.
+8. In the reference operation, Stratford Flowers route 7823 is currently VACANT (driver departed) — don't attribute a driver to it. This applies to the reference data only, not to the signed-in user's business.
 9. LANGUAGE: the user may write in English or Spanish — many drivers are Spanish-speaking. Always detect the user's language and respond ENTIRELY in that same language. Be natural and conversational in both; never mix languages in one reply unless the user does.
 ${setupSection}
 
@@ -1446,7 +1572,7 @@ async function runAssistantTurn(
   message: string,
   setupMode: boolean
 ): Promise<TurnResult> {
-  const scoped = buildScopedContext(ctx, brain);
+  const scoped = await buildScopedContext(ctx, brain);
   let systemInstruction = buildSystemPrompt(ctx, brain, scoped, setupMode);
 
   // In setup mode, ground every turn in live database state so the interview
