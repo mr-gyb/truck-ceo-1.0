@@ -21,6 +21,7 @@ import { TruckNavigation } from './components/TruckNavigation';
 import { UserSettings } from './components/UserSettings';
 import { RoutesManagement } from './components/RoutesManagement';
 import { OnboardingWizard } from './components/OnboardingWizard';
+import { SetupCompleteModal } from './components/SetupCompleteModal';
 import { SaleAlertFormModal } from './components/forms/SaleAlertFormModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { ToastContainer } from './components/ToastContainer';
@@ -43,6 +44,9 @@ const AppContent: React.FC = () => {
   const [wizardOpen, setWizardOpen] = useState(false);
   const [wizardSkippedThisSession, setWizardSkippedThisSession] = useState(false);
   const [setupCompleted, setSetupCompleted] = useState(false);
+  // Confirmation modal shown when the AI setup interview finishes, so the
+  // owner sees an explicit "your data was saved" moment (2026-09-30).
+  const [setupCompleteModalOpen, setSetupCompleteModalOpen] = useState(false);
 
   // Conversational setup (owner only): when an owner signs in with incomplete
   // setup (missing routes, trucks, or team), the Mateo AI assistant opens in
@@ -209,8 +213,9 @@ const AppContent: React.FC = () => {
             setSetupMode(false);
           }}
           onSetupComplete={() => {
-            setSetupMode(false);
-            setSetupCompleted(true);
+            // Show the explicit "your data was saved" confirmation first;
+            // the modal's dismiss finishes setup.
+            setSetupCompleteModalOpen(true);
           }}
         />
       ) : null}
@@ -257,6 +262,17 @@ const AppContent: React.FC = () => {
           }}
         />
       )}
+      <SetupCompleteModal
+        isOpen={setupCompleteModalOpen}
+        routeCount={routes.length}
+        truckCount={trucks.length}
+        teamCount={employees.length}
+        onClose={() => {
+          setSetupCompleteModalOpen(false);
+          setSetupMode(false);
+          setSetupCompleted(true);
+        }}
+      />
     </Layout>
   );
 };
