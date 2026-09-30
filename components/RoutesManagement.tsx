@@ -9,7 +9,7 @@ import { DriverInvite } from './DriverInvite';
 import { ConfirmDialog } from './ConfirmDialog';
 
 export const RoutesManagement: React.FC = () => {
-  const { routes, addRoute, updateRoute, deleteRoute, fetchDebug } = useData();
+  const { routes, addRoute, updateRoute, deleteRoute } = useData();
   const { toasts, showToast, removeToast } = useToast();
 
   const [expandedRouteId, setExpandedRouteId] = useState<string | null>(null);
@@ -169,13 +169,6 @@ export const RoutesManagement: React.FC = () => {
           <p className="text-gray-400 font-black uppercase tracking-widest text-sm">
             No routes yet. Add your first route to get started!
           </p>
-          {/* TEMPORARY diagnostic for the empty-routes investigation (remove after). */}
-          {fetchDebug && (
-            <p className="mt-4 font-mono text-[10px] text-gray-400 break-all">
-              dbg: bid={fetchDebug.businessId ?? 'null'} returned={fetchDebug.routesReturned}
-              {fetchDebug.error ? ` err=${fetchDebug.error}` : ''} at={fetchDebug.at}
-            </p>
-          )}
         </div>
       ) : (
         <div className="space-y-4">
