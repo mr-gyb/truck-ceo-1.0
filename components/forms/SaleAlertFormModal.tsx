@@ -29,7 +29,7 @@ export const SaleAlertFormModal: React.FC<SaleAlertFormModalProps> = ({
 
   // Get all stores from all routes
   const allStores = routes.flatMap(route =>
-    route.stores.map(store => ({ name: store.name, routeName: route.name }))
+    (route.stores || []).map(store => ({ name: store.name, routeName: route.name }))
   );
 
   useEffect(() => {
