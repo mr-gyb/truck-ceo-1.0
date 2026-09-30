@@ -1910,26 +1910,29 @@ export const saveFeedCredentials = onRequest(
     }
 
     // Auth: Firebase ID token (same helper as the assistant).
-    const ctx = await getUserCtx(req);
-    if (!ctx) {
-      res.status(401).json({ error: "Sign in to connect a data feed." });
-      return;
-    }
+    // Everything below is inside try/catch so a failure always returns JSON
+    // (never a blank non-JSON 500 the app can't parse).
+    try {
+      const ctx = await getUserCtx(req);
+      if (!ctx) {
+        res.status(401).json({ error: "Sign in to connect a data feed." });
+        return;
+      }
 
-    // Owner only.
-    const denied = requireOwner(ctx);
-    if (denied) {
-      res
-        .status(403)
-        .json({ error: denied.error || "Only the business owner can connect data feeds." });
-      return;
-    }
+      // Owner only.
+      const denied = requireOwner(ctx);
+      if (denied) {
+        res
+          .status(403)
+          .json({ error: denied.error || "Only the business owner can connect data feeds." });
+        return;
+      }
 
-    // Rate limit.
-    if (!(await checkRateLimit(ctx.uid))) {
-      res.status(429).json({ error: "Slow down a little — try again in a few minutes." });
-      return;
-    }
+      // Rate limit.
+      if (!(await checkRateLimit(ctx.uid))) {
+        res.status(429).json({ error: "Slow down a little — try again in a few minutes." });
+        return;
+      }
 
     const { platform, username, password } = req.body || {};
     const label = FEED_PLATFORMS[String(platform || "")];
@@ -1997,11 +2000,27 @@ export const saveFeedCredentials = onRequest(
           { merge: true }
         );
 
+      logger.info("saveFeedCredentials: saved", { platform: slug, business: bid });
       res.status(200).json({ ok: true, platform: slug, status: "pending" });
-    } catch (e) {
-      // Log the platform only — never credential values.
-      logger.error("saveFeedCredentials failed", { platform: slug });
+    } catch (e: any) {
+      // Log the cause (message + code only — never credential values) so a
+      // vault failure is diagnosable in Cloud Logging instead of a blank 500.
+      logger.error("saveFeedCredentials failed", {
+        platform: slug,
+        message: e?.message || String(e),
+        code: e?.code,
+      });
       res.status(500).json({ error: "Couldn't save the credentials right now — try again." });
+    }
+    } catch (e: any) {
+      // Outer safety net: something in auth/validation threw — always answer
+      // with JSON so the app never sees a blank non-JSON 500.
+      logger.error("saveFeedCredentials failed before vault write", {
+        message: e?.message || String(e),
+      });
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Couldn't save the credentials right now — try again." });
+      }
     }
   }
 );
