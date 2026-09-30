@@ -1854,7 +1854,8 @@ export const saveFeedCredentials = onRequest(
         },
       });
 
-      // Firestore: status doc only — NEVER the password.
+      // Firestore: status doc only — NEVER credentials. Both username and
+      // password live only in Secret Manager; nothing identifying goes here.
       await db
         .collection(`businesses/${bid}/connections`)
         .doc(slug)
@@ -1862,7 +1863,6 @@ export const saveFeedCredentials = onRequest(
           {
             platform: slug,
             label,
-            username: u,
             status: "pending",
             requestedBy: ctx.uid,
             requestedAt: admin.firestore.FieldValue.serverTimestamp(),
