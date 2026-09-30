@@ -79,7 +79,7 @@ export const RoutesManagement: React.FC = () => {
         const { routeId, store } = deleteTarget.data;
         const route = routes.find(r => r.id === routeId);
         if (route) {
-          const updatedStores = route.stores.filter(s => s.id !== store.id);
+          const updatedStores = (route.stores || []).filter(s => s.id !== store.id);
           await updateRoute(routeId, { stores: updatedStores });
           showToast(`Store "${store.name}" removed`, 'success');
         }
@@ -116,7 +116,7 @@ export const RoutesManagement: React.FC = () => {
 
       if (editingStore) {
         // Update existing store
-        const updatedStores = route.stores.map(s =>
+        const updatedStores = (route.stores || []).map(s =>
           s.id === editingStore.id ? { ...s, ...storeData } : s
         );
         await updateRoute(routeId, { stores: updatedStores });
@@ -127,7 +127,7 @@ export const RoutesManagement: React.FC = () => {
           id: `store-${Date.now()}`,
           ...storeData
         };
-        const updatedStores = [...route.stores, newStore];
+        const updatedStores = [...(route.stores || []), newStore];
         await updateRoute(routeId, { stores: updatedStores });
         showToast('Store added successfully', 'success');
       }
@@ -192,7 +192,7 @@ export const RoutesManagement: React.FC = () => {
                     <div>
                       <h3 className="text-xl font-black uppercase tracking-tight">{route.name}</h3>
                       <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mt-1">
-                        {route.stores.length} Store{route.stores.length !== 1 ? 's' : ''}
+                        {(route.stores || []).length} Store{(route.stores || []).length !== 1 ? 's' : ''}
                       </p>
                     </div>
                   </div>
@@ -245,7 +245,7 @@ export const RoutesManagement: React.FC = () => {
                       </button>
                     </div>
 
-                    {route.stores.length === 0 ? (
+                    {(route.stores || []).length === 0 ? (
                       <div className="bg-gray-50 rounded-2xl p-6 text-center">
                         <p className="text-gray-400 text-xs font-bold uppercase tracking-wider">
                           No stores in this route yet
@@ -253,7 +253,7 @@ export const RoutesManagement: React.FC = () => {
                       </div>
                     ) : (
                       <div className="space-y-2">
-                        {route.stores.map((store) => (
+                        {(route.stores || []).map((store) => (
                           <div
                             key={store.id}
                             className="bg-gray-50 p-4 rounded-2xl flex items-center justify-between group hover:bg-gray-100 transition-all"

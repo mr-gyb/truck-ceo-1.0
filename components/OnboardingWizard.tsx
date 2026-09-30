@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { doc, getDoc, getDocs, collection, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, getDoc, getDocs, collection, updateDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../services/firebaseConfig';
 import { useAuth } from '../contexts/AuthContext';
 import { useData } from '../contexts/DataContext';
@@ -33,6 +33,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onDone }) =>
   const [businessName, setBusinessName] = useState('');
   const [nameLoaded, setNameLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
   const [routeModalOpen, setRouteModalOpen] = useState(false);
   const [truckModalOpen, setTruckModalOpen] = useState(false);
   const [connections, setConnections] = useState<Array<{ id: string; data: any }>>([]);
@@ -65,10 +66,14 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onDone }) =>
     if (!name) return false;
     setSaving(true);
     try {
-      await updateDoc(doc(db, 'businesses', businessId), { name });
+      // setDoc with merge (not updateDoc): updateDoc throws if the business
+      // doc doesn't exist yet, which froze the wizard with no visible error.
+      await setDoc(doc(db, 'businesses', businessId), { name }, { merge: true });
+      setSaveError('');
       return true;
     } catch (err) {
       console.error('Wizard: business name save failed', err);
+      setSaveError("Couldn't save — check your connection and try again.");
       return false;
     } finally {
       setSaving(false);
@@ -195,11 +200,17 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onDone }) =>
                 <input
                   type="text"
                   value={businessName}
-                  onChange={(e) => setBusinessName(e.target.value)}
+                  onChange={(e) => {
+                    setBusinessName(e.target.value);
+                    setSaveError('');
+                  }}
                   disabled={!nameLoaded}
                   placeholder={nameLoaded ? 'e.g., Mateo\'s in Motion' : 'Loading…'}
                   className="w-full p-4 bg-gray-50 border-2 border-gray-200 rounded-2xl focus:ring-2 focus:ring-[#FFD700] focus:border-[#FFD700] outline-none font-bold disabled:opacity-50"
                 />
+                {saveError && (
+                  <p className="text-red-600 text-xs font-bold mt-2">{saveError}</p>
+                )}
               </div>
             </div>
           )}
@@ -331,9 +342,10 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({ onDone }) =>
               <div className="bg-blue-50 border-2 border-blue-100 rounded-2xl p-5">
                 <p className="text-xs font-bold text-blue-900 leading-relaxed">
                   <i className="fas fa-info-circle mr-2"></i>
-                  Bakery data feeds (Flowers IDP, Bimbo ION) are connected by GYBs —
-                  your ops team — not something you plug in here. Nothing to
-                  configure on this screen.
+                  Connect your bakery logins from the Data Hub — tap
+                  "Connect securely" on each source and enter your portal login.
+                  Credentials go to a secure vault only GYBs can reach; the sync
+                  itself is wired by your ops team.
                 </p>
               </div>
               <div className="space-y-2">

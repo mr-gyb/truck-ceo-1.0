@@ -10,6 +10,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../services/firebaseConfig';
 import { useAuth } from '../contexts/AuthContext';
+import { SecureConnectModal } from './SecureConnectModal';
 import { CSVUploader } from './CSVUploader';
 import { View, InviteCode } from '../types';
 
@@ -89,10 +90,15 @@ interface ConnectionState {
 const ConnectionCard: React.FC<{
   source: SourceDef;
   conn?: ConnectionState;
-}> = ({ source, conn }) => {
+  isOwner: boolean;
+  onConnect?: () => void;
+}> = ({ source, conn, isOwner, onConnect }) => {
   // Honest status: static for Discord/Drive; for bakery sources the optional
   // connections/{id} doc refines it, otherwise "Not synced yet".
-  const pillText = source.staticStatus ?? conn?.status ?? 'Not synced yet';
+  // A 'pending' doc (secure credentials saved, GYBs wiring in progress)
+  // renders the pending pill.
+  const rawStatus = source.staticStatus ?? conn?.status ?? 'Not synced yet';
+  const pillText = rawStatus === 'pending' ? 'Pending — GYBs wiring' : rawStatus;
   const isLive =
     pillText.toLowerCase().startsWith('active') ||
     pillText.toLowerCase().startsWith('connected') ||
@@ -111,10 +117,20 @@ const ConnectionCard: React.FC<{
             {source.blurb}
           </p>
           {source.bakery && (
-            <p className="text-[9px] font-bold uppercase tracking-widest text-gray-400 mt-1.5">
-              <i className="fas fa-shield-halved mr-1 text-[#FFD700]"></i>
-              Credentials secured — sync via supervised agent loop. Bakery logins are never entered in this app.
-            </p>
+            <>
+              <p className="text-[9px] font-bold uppercase tracking-widest text-gray-400 mt-1.5">
+                <i className="fas fa-shield-halved mr-1 text-[#FFD700]"></i>
+                Bakery logins are entered through the secure form — never in chat.
+              </p>
+              {isOwner && onConnect && (
+                <button
+                  onClick={onConnect}
+                  className="mt-2 px-4 py-2.5 bg-black text-[#FFD700] rounded-xl text-[10px] font-black uppercase tracking-widest active:scale-95 transition-all flex items-center gap-2"
+                >
+                  <i className="fas fa-lock"></i> Connect securely
+                </button>
+              )}
+            </>
           )}
           {syncedAt && (
             <p className="text-[9px] font-bold uppercase tracking-widest text-gray-400 mt-1">
@@ -364,6 +380,7 @@ export const DataHub: React.FC<DataHubProps> = ({ onNavigate }) => {
   const businessId = userProfile?.businessId;
   const isOwner = userProfile?.role === 'business_owner';
   const [connections, setConnections] = useState<Record<string, ConnectionState>>({});
+  const [connectFor, setConnectFor] = useState<SourceDef | null>(null);
 
   // Optional per-source sync state: businesses/{businessId}/connections/{sourceId}
   // (fields: status, lastSyncAt). Missing doc => "Not synced yet".
@@ -414,10 +431,32 @@ export const DataHub: React.FC<DataHubProps> = ({ onNavigate }) => {
 
         <div className="grid grid-cols-1 gap-3">
           {SOURCES.map((s) => (
-            <ConnectionCard key={s.id} source={s} conn={connections[s.id]} />
+            <ConnectionCard
+              key={s.id}
+              source={s}
+              conn={connections[s.id]}
+              isOwner={isOwner}
+              onConnect={s.bakery ? () => setConnectFor(s) : undefined}
+            />
           ))}
         </div>
       </section>
+
+      {/* Secure bakery credential capture */}
+      {connectFor && (
+        <SecureConnectModal
+          platform={connectFor.id}
+          platformName={connectFor.name}
+          onClose={() => setConnectFor(null)}
+          onSaved={() => {
+            setConnections((prev) => ({
+              ...prev,
+              [connectFor.id]: { status: 'pending' },
+            }));
+            setConnectFor(null);
+          }}
+        />
+      )}
 
       {/* Invite Links — owners only */}
       {isOwner && businessId && currentUser && (

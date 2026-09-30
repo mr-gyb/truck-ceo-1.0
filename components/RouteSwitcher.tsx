@@ -49,12 +49,12 @@ export const RouteSwitcher: React.FC<RouteSwitcherProps> = ({
               className="w-full p-4 bg-gray-50 border border-gray-100 rounded-2xl font-black text-xs uppercase tracking-widest focus:ring-2 focus:ring-[#FFD700] outline-none"
               value={currentStore?.id || 'all'}
               onChange={(e) => {
-                const store = currentRoute.stores.find(s => s.id === e.target.value) || null;
+                const store = (currentRoute.stores || []).find(s => s.id === e.target.value) || null;
                 onStoreChange(store);
               }}
             >
               <option value="all">All Stores in {currentRoute.name}</option>
-              {currentRoute.stores.map(store => (
+              {(currentRoute.stores || []).map(store => (
                 <option key={store.id} value={store.id}>{store.name}</option>
               ))}
             </select>
