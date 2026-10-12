@@ -20,7 +20,13 @@ export const EmployeeEngagement: React.FC<EmployeeEngagementProps> = ({ employee
   const { toasts, showToast, removeToast } = useToast();
 
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const avgEngagement = employees.reduce((acc, curr) => acc + curr.engagementScore, 0) / employees.length;
+  // Guard both NaN paths: an empty list (0 / 0) and partial employee docs
+  // whose engagementScore is undefined. This value feeds the hero % and the
+  // pie chart, so it must always be finite — an empty team reads as 0.
+  const rawAvgEngagement = employees.length === 0
+    ? 0
+    : employees.reduce((acc, curr) => acc + (Number(curr.engagementScore) || 0), 0) / employees.length;
+  const avgEngagement = Number.isFinite(rawAvgEngagement) ? rawAvgEngagement : 0;
 
   // Modal state
   const [showEmployeeModal, setShowEmployeeModal] = useState(false);
@@ -195,11 +201,11 @@ export const EmployeeEngagement: React.FC<EmployeeEngagementProps> = ({ employee
                     <div className="text-[8px] font-black text-gray-400 uppercase tracking-widest mb-1">Attendance</div>
                     <div className="flex items-center gap-2">
                       <div className="text-sm font-black text-black">
-                        {emp.attendance.filter(a => a.lateStart).length} Late Starts
+                        {(emp.attendance ?? []).filter(a => a.lateStart).length} Late Starts
                       </div>
                     </div>
                     <div className="text-[9px] font-bold text-gray-400 mt-1">
-                      {emp.attendance.filter(a => a.lateFinish).length} Late Finishes
+                      {(emp.attendance ?? []).filter(a => a.lateFinish).length} Late Finishes
                     </div>
                   </div>
                   <div className="bg-gray-50 p-4 rounded-2xl">
