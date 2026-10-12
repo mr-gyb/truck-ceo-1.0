@@ -9,6 +9,12 @@
 #   inviteCodes/{CODE}         -> global lookup for driver join (readable by any authed user)
 #   businesses/{bid}/...      -> everything under a business is tenant-isolated
 #   businesses/{bid}/routes/{rid}/eod|photos|updates -> driver-submitted data
+#
+# 2026-09-30: Replaced the recursive /{subcollection=**} wildcard with
+# explicit per-collection matches. The wildcard's list (query) evaluation
+# was denying reads ("Missing or insufficient permissions") while single-doc
+# gets on the same paths were allowed. Explicit matches keep identical
+# tenant-isolation semantics with predictable list behavior.
 
 rules_version = '2';
 service cloud.firestore {
@@ -24,6 +30,10 @@ service cloud.firestore {
 
     function myBusiness() {
       return myProfile().businessId;
+    }
+
+    function isMyBusiness(bid) {
+      return isAuthed() && myBusiness() == bid;
     }
 
     // Invite codes: any signed-in user can read (driver join flow).
@@ -45,53 +55,79 @@ service cloud.firestore {
 
     // Businesses: full tenant isolation. You can only touch your own business.
     match /businesses/{bid} {
-      allow read, write: if isAuthed() && myBusiness() == bid;
+      allow read, write: if isMyBusiness(bid);
 
       // AI assistant threads: tenant members can READ (chat history);
-      // only the backend function (Admin SDK) writes. Carved out of the
-      // wildcard below so clients can never write threads or messages.
+      // only the backend function (Admin SDK) writes.
       match /assistantThreads/{tid} {
-        allow read: if isAuthed() && myBusiness() == bid;
+        allow read: if isMyBusiness(bid);
         match /messages/{mid} {
-          allow read: if isAuthed() && myBusiness() == bid;
+          allow read: if isMyBusiness(bid);
         }
       }
 
       // Invite links: business members can read; only owners create/revoke.
-      // (The recursive wildcard below excludes 'invites' so member writes
-      // can't sneak through the broader match.)
       match /invites/{code} {
-        allow read: if isAuthed() && myBusiness() == bid;
-        allow write: if isAuthed() && myBusiness() == bid && myProfile().role == 'business_owner';
+        allow read: if isMyBusiness(bid);
+        allow write: if isMyBusiness(bid) && myProfile().role == 'business_owner';
       }
 
       // Data-source connection status: written only by the backend function
       // (Admin SDK bypasses rules). Clients can read the status pills.
       match /connections/{cid} {
-        allow read: if isAuthed() && myBusiness() == bid;
+        allow read: if isMyBusiness(bid);
         allow write: if false;
       }
 
       // Operational alerts (truck issues, store problems, staffing gaps):
       // canonical store written by the assistant backend via Admin SDK.
       // Business members can read them for display; only owners manage them
-      // in-app. (Also covered by the wildcard below; stated explicitly.)
+      // in-app.
       match /alerts/{aid} {
-        allow read: if isAuthed() && myBusiness() == bid;
-        allow write: if isAuthed() && myBusiness() == bid && myProfile().role == 'business_owner';
+        allow read: if isMyBusiness(bid);
+        allow write: if isMyBusiness(bid) && myProfile().role == 'business_owner';
       }
 
-      match /{subcollection=**} {
-        allow read, write: if isAuthed() && myBusiness() == bid
-          && subcollection[0] != 'assistantThreads'
-          && subcollection[0] != 'invites'
-          && subcollection[0] != 'connections';
+      // Routes + driver-submitted nested data (EOD, photos, updates).
+      // Members of the business can read/write their own business's data.
+      match /routes/{rid} {
+        allow read, write: if isMyBusiness(bid);
+        match /eod/{eid} {
+          allow read, write: if isMyBusiness(bid);
+        }
+        match /photos/{pid} {
+          allow read, write: if isMyBusiness(bid);
+        }
+        match /updates/{updid} {
+          allow read, write: if isMyBusiness(bid);
+        }
+      }
+
+      // Fleet + team + catalog collections.
+      match /trucks/{tid} {
+        allow read, write: if isMyBusiness(bid);
+      }
+      match /employees/{eid} {
+        allow read, write: if isMyBusiness(bid);
+      }
+      match /products/{pid} {
+        allow read, write: if isMyBusiness(bid);
+      }
+      match /saleAlerts/{said} {
+        allow read, write: if isMyBusiness(bid);
+      }
+
+      // Owner-initiated data-feed requests + CSV imports.
+      match /dataFeedRequests/{drid} {
+        allow read, write: if isMyBusiness(bid);
+      }
+      match /csv/{csvid} {
+        allow read, write: if isMyBusiness(bid);
       }
     }
 
     // ------------------------------------------------------------------
-    // AI assistant collections (added 2026-09-28). These ride along with
-    // the already-pending console paste of this file (owed since 2026-09-26).
+    // AI assistant collections (added 2026-09-28).
     //
     // agentInbox: a business owner can read their own business's items.
     // Only the backend function (Admin SDK) writes. Drivers see the
@@ -109,19 +145,3 @@ service cloud.firestore {
     }
   }
 }
-
-# ------------------------------------------------------------------
-# Storage rules (Firebase console > Storage > Rules):
-#
-# rules_version = '2';
-# service firebase.storage {
-#   match /b/{bucket}/o {
-#     function isAuthed() { return request.auth != null; }
-#     function myBusiness() {
-#       return firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.businessId;
-#     }
-#     match /driver-photos/{bid}/{rid}/{day}/{file} {
-#       allow read, write: if isAuthed() && myBusiness() == bid;
-#     }
-#   }
-# }
