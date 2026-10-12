@@ -82,6 +82,69 @@ interface TurnResult {
 let brainCache: any = null;
 let brainCacheAt = 0;
 
+/**
+ * Normalize a loaded brain to the shape the tool layer reads.
+ *
+ * Two sources exist and they do NOT share a schema:
+ * - The Firestore override (appConfig/assistantBrain) is expected to already
+ *   carry a top-level `routes` object keyed by route number.
+ * - brain.seed.json instead carries a top-level `businesses` ARRAY, each
+ *   business holding `routes` as an array of
+ *   { number, driver, payPerWeek, partner (on the business), territory,
+ *     notes, driverAliases? } — with no top-level `routes`/`weeklyBaseline`.
+ * Without this step the seed silently breaks every brain consumer:
+ * resolveRoute() iterates an undefined `brain.routes`, execRouteSummary gets
+ * `brain: null` (no driver/truck/business), and execBusinessOverview runs
+ * Object.entries over the businesses array (ids "0","1","2", bakery
+ * undefined). Idempotent: a brain that already matches the expected shape
+ * passes through unchanged.
+ */
+function normalizeBrain(brain: any): any {
+  if (!brain || typeof brain !== "object") return brain;
+  const out = { ...brain };
+  const routesIsObject =
+    out.routes != null &&
+    typeof out.routes === "object" &&
+    !Array.isArray(out.routes);
+  if (!routesIsObject && Array.isArray(out.businesses)) {
+    const routes: Record<string, any> = {};
+    const businesses: Record<string, any> = {};
+    for (const biz of out.businesses) {
+      if (!biz || typeof biz !== "object") continue;
+      const list = Array.isArray(biz.routes) ? biz.routes : [];
+      for (const r of list) {
+        if (!r || r.number == null) continue;
+        routes[String(r.number)] = {
+          territory: r.territory ?? null,
+          driver: r.driver ?? null,
+          driverPay: r.payPerWeek ?? null,
+          bakery: biz.partner ?? null,
+          business: biz.name ?? null,
+          notes: r.notes ?? "",
+          ...(Array.isArray(r.driverAliases)
+            ? { driverAliases: r.driverAliases }
+            : {}),
+          ...(r.driver == null ? { vacant: true } : {}),
+        };
+      }
+      if (biz.id != null) {
+        // execBusinessOverview iterates businesses as an id-keyed object and
+        // reads `.bakery`; the seed names that field `partner`.
+        businesses[String(biz.id)] = {
+          ...biz,
+          bakery: biz.bakery ?? biz.partner ?? null,
+        };
+      }
+    }
+    out.routes = routes;
+    out.businesses = businesses;
+  }
+  if (out.weeklyBaseline == null) {
+    out.weeklyBaseline = out.economics?.weeklyBaseline ?? null;
+  }
+  return out;
+}
+
 async function loadBrain(): Promise<any> {
   const now = Date.now();
   if (brainCache && now - brainCacheAt < 10 * 60 * 1000) return brainCache;
@@ -89,7 +152,7 @@ async function loadBrain(): Promise<any> {
   try {
     const snap = await db.collection("appConfig").doc("assistantBrain").get();
     if (snap.exists) {
-      brainCache = snap.data();
+      brainCache = normalizeBrain(snap.data());
       brainCacheAt = now;
       return brainCache;
     }
@@ -100,7 +163,7 @@ async function loadBrain(): Promise<any> {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const seed = require("../brain.seed.json");
-    brainCache = seed;
+    brainCache = normalizeBrain(seed);
     brainCacheAt = now;
     return brainCache;
   } catch (e) {
@@ -624,6 +687,9 @@ async function execRouteSummary(
   // Prefer live Firestore fields; the reference brain only fills gaps.
   const live = route.live;
   const brainRoute = route.brain || {};
+  // Read failures are surfaced in `partial` — a failed read must never be
+  // indistinguishable from "no data" inside an ok:true result.
+  const partial: string[] = [];
   // recent EOD reports — the app's real collection
   let eod: any[] = [];
   if (bid && route.docId) {
@@ -636,21 +702,29 @@ async function execRouteSummary(
       eod = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     } catch (e) {
       logger.warn("execRouteSummary: eod read failed", e);
+      partial.push("eod_read_failed");
     }
   }
   // open operational alerts for route
   let alerts: any[] = [];
-  if (bid) {
+  let alertsScope: string | null = null;
+  if (bid && route.docId) {
     try {
-      let q: admin.firestore.Query = db
+      const snap = await db
         .collection(`businesses/${bid}/alerts`)
-        .where("status", "==", "open");
-      if (route.docId) q = q.where("routeId", "==", route.docId);
-      const snap = await q.get();
+        .where("status", "==", "open")
+        .where("routeId", "==", route.docId)
+        .get();
       alerts = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     } catch (e) {
       logger.warn("execRouteSummary: alerts read failed", e);
+      partial.push("alerts_read_failed");
     }
+  } else if (!route.docId) {
+    // Route matched the reference brain only — no Firestore route doc exists.
+    // Do NOT fall back to an unfiltered business-wide alerts query: that
+    // presented every open alert in the business as this route's alerts.
+    alertsScope = "unavailable_route_unlinked";
   }
   return {
     ok: true,
@@ -665,6 +739,8 @@ async function execRouteSummary(
       routeDocId: route.docId,
       recentEod: eod,
       openAlerts: alerts,
+      ...(alertsScope ? { alertsScope } : {}),
+      ...(partial.length ? { partial } : {}),
       source: live ? "live" : "reference",
     },
   };
