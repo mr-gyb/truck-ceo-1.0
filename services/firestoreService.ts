@@ -94,7 +94,13 @@ export class FirestoreService {
 
   async addRoute(route: Omit<RouteTerritory, 'id'>): Promise<string> {
     const docRef = doc(collection(db, `businesses/${this.businessId}/routes`));
-    await setDoc(docRef, route);
+    // Firestore rejects undefined field values — strip them so a blank
+    // optional field (e.g. routeNumber passed through from a form or the
+    // onboarding wizard) can never make route creation throw.
+    const payload = Object.fromEntries(
+      Object.entries(route).filter(([, v]) => v !== undefined)
+    );
+    await setDoc(docRef, payload);
     return docRef.id;
   }
 
