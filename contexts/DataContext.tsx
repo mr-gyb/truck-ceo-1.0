@@ -63,11 +63,18 @@ export const DataProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const fetchData = async (service: FirestoreService) => {
     setLoading(true);
+    // allSettled helper: a rejected query logs its error and yields an empty
+    // list for that collection only — it must never empty the other lists.
+    const settledList = <T,>(res: PromiseSettledResult<T[]>, label: string): T[] => {
+      if (res.status === 'fulfilled') return res.value;
+      console.error(`Error fetching ${label}:`, res.reason);
+      return [];
+    };
     try {
       if (userProfile?.role === 'business_owner') {
         // Business owners see everything
         console.log('Fetching all data for business owner...');
-        const [p, e, t, s, r, a] = await Promise.all([
+        const [pRes, eRes, tRes, sRes, rRes, aRes] = await Promise.allSettled([
           service.getProducts(),
           service.getEmployees(),
           service.getTrucks(),
@@ -75,6 +82,12 @@ export const DataProvider: React.FC<{ children: React.ReactNode }> = ({ children
           service.getRoutes(),
           service.getOperationalAlerts()
         ]);
+        const p = settledList(pRes, 'products');
+        const e = settledList(eRes, 'employees');
+        const t = settledList(tRes, 'trucks');
+        const s = settledList(sRes, 'sale alerts');
+        const r = settledList(rRes, 'routes');
+        const a = settledList(aRes, 'alerts');
         setProducts(p);
         setEmployees(e);
         setTrucks(t);
@@ -91,10 +104,12 @@ export const DataProvider: React.FC<{ children: React.ReactNode }> = ({ children
           const assignedRoutes = (employee as any).assignedRoutes || [];
           console.log('Team member assigned routes:', assignedRoutes);
 
-          const [p, r] = await Promise.all([
+          const [pRes, rRes] = await Promise.allSettled([
             service.getProducts(),
             service.getRoutesForTeamMember(assignedRoutes)
           ]);
+          const p = settledList(pRes, 'products');
+          const r = settledList(rRes, 'routes');
 
           setProducts(p);
           setRoutes(r);
