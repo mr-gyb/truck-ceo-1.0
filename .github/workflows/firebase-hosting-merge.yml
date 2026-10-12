@@ -51,4 +51,9 @@ jobs:
       # exists before the hosting config is validated — otherwise the hosting
       # step fails with "Cloud Run service ... does not exist".
       - run: npx -y firebase-tools@latest deploy --only functions --force --project truck-ceo
+      # Firestore rules deploy (added 2026-10-12): firebase.json now carries a
+      # firestore section, but CI previously never deployed rules, so live rules
+      # could drift from the repo. The deployer service account needs
+      # roles/firebaserules.admin (or equivalent) for this step to succeed.
+      - run: npx -y firebase-tools@latest deploy --only firestore:rules --project truck-ceo
       - run: npx -y firebase-tools@latest deploy --only hosting --project truck-ceo
