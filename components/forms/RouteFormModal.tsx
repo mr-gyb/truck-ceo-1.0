@@ -59,9 +59,13 @@ export const RouteFormModal: React.FC<RouteFormModalProps> = ({
 
     setSubmitting(true);
     try {
+      // Omit routeNumber entirely when blank: Firestore rejects undefined
+      // field values, so `routeNumber: undefined` made setDoc throw and the
+      // route was silently never written.
+      const routeNumber = formData.routeNumber.trim();
       await onSubmit({
         name: formData.name.trim(),
-        routeNumber: formData.routeNumber.trim() || undefined,
+        ...(routeNumber ? { routeNumber } : {}),
         stores: formData.stores
       });
       onClose();
