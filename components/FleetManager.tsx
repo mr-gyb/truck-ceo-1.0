@@ -47,20 +47,26 @@ export const FleetManager: React.FC = () => {
     if (!service) return;
     setLoading(true);
     setError(null);
-    try {
-      const [r, t, e] = await Promise.all([
-        service.getRoutes(),
-        service.getTrucks(),
-        service.getEmployees(),
-      ]);
-      setRoutes(r);
-      setTrucks(t);
-      setEmployees(e);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not load fleet data.');
-    } finally {
-      setLoading(false);
+    // allSettled: one rejected collection must not present as zero trucks AND
+    // zero routes AND zero employees — each query resolves independently,
+    // a rejection logs and empties only its own list.
+    const [r, t, e] = await Promise.allSettled([
+      service.getRoutes(),
+      service.getTrucks(),
+      service.getEmployees(),
+    ]);
+    const rejected: PromiseRejectedResult[] = [];
+    if (r.status === 'fulfilled') setRoutes(r.value);
+    else { console.error('Error fetching routes:', r.reason); setRoutes([]); rejected.push(r); }
+    if (t.status === 'fulfilled') setTrucks(t.value);
+    else { console.error('Error fetching trucks:', t.reason); setTrucks([]); rejected.push(t); }
+    if (e.status === 'fulfilled') setEmployees(e.value);
+    else { console.error('Error fetching employees:', e.reason); setEmployees([]); rejected.push(e); }
+    if (rejected.length) {
+      const reason = rejected[0].reason;
+      setError(reason instanceof Error ? reason.message : 'Could not load fleet data.');
     }
+    setLoading(false);
   }, [service]);
 
   useEffect(() => {
@@ -162,6 +168,16 @@ export const FleetManager: React.FC = () => {
         name: newDriverName.trim(),
         role: 'driver',
         phone: newDriverPhone.trim() === '' ? null : newDriverPhone.trim(),
+        // Full Employee defaults (types.ts), matching EmployeeFormModal and
+        // the assistant backend — partial docs ({name, role, phone} only)
+        // made Team Analytics render NaN% and crashed its expanded view.
+        hoursThisWeek: 0,
+        engagementScore: 0,
+        status: 'active',
+        salesHistory: [],
+        attendance: [],
+        vacationDaysUsed: 0,
+        sickDaysUsed: 0,
       });
       setNewDriverName('');
       setNewDriverPhone('');
