@@ -1,3 +1,4 @@
+// Node.js 22 runtime — upgraded 2026-10-12. This comment forces a functions redeploy so the firebase.json runtime change (nodejs20 -> nodejs22) takes effect; firebase-tools skips redeploys when function code is unchanged.
 /**
  * TruckCEO in-app AI assistant — askAssistant (Gemini-primary, provider abstraction)
  *
