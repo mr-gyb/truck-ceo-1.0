@@ -11,7 +11,7 @@
     "typescript": "~5.8.2"
   },
   "engines": {
-    "node": "20"
+    "node": "22"
   },
   "main": "lib/index.js",
   "name": "truckceo-functions",
