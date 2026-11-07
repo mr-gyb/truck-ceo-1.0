@@ -99,6 +99,10 @@ export interface Store {
   id: string;
   name: string;
   address: string;
+  // Supplier store/customer number (e.g. Flowers sold-to "40408551", Bimbo
+  // store number). Settlement/shrink/margin rows join to stores by this —
+  // see functions/src/settlements. Set in Routes management.
+  storeNumber?: string;
 }
 
 export interface RouteTerritory {
@@ -110,6 +114,15 @@ export interface RouteTerritory {
   // Optional bakery route number (e.g. "2080"). The assistant matches routes
   // by this first, then by name. Set at creation; editable in Routes management.
   routeNumber?: string;
+  // Data-intake mapping (2026-11-06): which supplier this route settles
+  // with, the settlement account id with that supplier (Bimbo SA
+  // 5045/6442/6418/5713; Flowers distributor number 20040812/20040846/
+  // 20042103), and the umbrella vendor id where one exists (Bimbo 116300).
+  // These fields are what keep a settlement file from ever being filed
+  // under the wrong route.
+  supplier?: 'flowers' | 'bimbo';
+  settlementAccount?: string;
+  vendorId?: string;
 }
 
 export type View = 'dashboard' | 'ordering' | 'team' | 'fleet' | 'fleet_assign' | 'promos' | 'data_hub' | 'weather' | 'navigation' | 'settings' | 'routes_management';

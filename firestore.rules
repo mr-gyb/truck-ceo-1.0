@@ -101,6 +101,53 @@ service cloud.firestore {
         match /updates/{updid} {
           allow read, write: if isMyBusiness(bid);
         }
+
+        // ---- Data intake (added 2026-11-06; see docs/data-intake-design.md
+        // and functions/src/settlements). Records are written by the
+        // backend parser via Admin SDK (bypasses rules). Members can read;
+        // only owners can write from a client (manual repair path). ----
+        match /settlements/{weekEnding} {
+          allow read: if isMyBusiness(bid);
+          allow write: if isMyBusiness(bid) && myProfile().role == 'business_owner';
+        }
+        match /shrinkReports/{weekEnding} {
+          allow read: if isMyBusiness(bid);
+          allow write: if isMyBusiness(bid) && myProfile().role == 'business_owner';
+        }
+        // Customer Margin Detail provenance copies (store rows are also
+        // merged onto the week's settlement record by the backend).
+        match /marginDetails/{weekEnding} {
+          allow read: if isMyBusiness(bid);
+          allow write: if isMyBusiness(bid) && myProfile().role == 'business_owner';
+        }
+        match /stalesReports/{weekEnding} {
+          allow read: if isMyBusiness(bid);
+          allow write: if isMyBusiness(bid) && myProfile().role == 'business_owner';
+        }
+        match /loadSummaries/{weekEnding} {
+          allow read: if isMyBusiness(bid);
+          allow write: if isMyBusiness(bid) && myProfile().role == 'business_owner';
+        }
+        match /marginTotals/{weekEnding} {
+          allow read: if isMyBusiness(bid);
+          allow write: if isMyBusiness(bid) && myProfile().role == 'business_owner';
+        }
+        match /orders/{weekEnding} {
+          allow read: if isMyBusiness(bid);
+          allow write: if isMyBusiness(bid) && myProfile().role == 'business_owner';
+        }
+        // Discord daily activity: grain is route-DAY (doc id = yyyy-mm-dd).
+        match /activity/{date} {
+          allow read: if isMyBusiness(bid);
+          allow write: if isMyBusiness(bid) && myProfile().role == 'business_owner';
+        }
+      }
+
+      // Ingestion registry: one entry per ingested item, any source.
+      // Written by the backend via Admin SDK; members read, owners repair.
+      match /ingestionRegistry/{ingestId} {
+        allow read: if isMyBusiness(bid);
+        allow write: if isMyBusiness(bid) && myProfile().role == 'business_owner';
       }
 
       // Fleet + team + catalog collections.
