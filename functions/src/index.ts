@@ -2127,8 +2127,20 @@ export const saveFeedCredentials = onRequest(
 );
 
 // ─── Flowers IDP settlement intake (added 2026-11-07) ─────────────────────
-// Storage trigger + owner-callable reprocess for businesses/{bid}/
-// settlement-uploads/*.pdf -> parsed settlement/shrink/margin records +
-// ingestion registry. See functions/src/settlements/ingest.ts and
-// docs/data-intake-design.md.
-export { onSettlementUpload, reprocessSettlement } from "./settlements/ingest";
+// Owner-callable ingest for businesses/{bid}/settlement-uploads/*.pdf ->
+// parsed settlement/shrink/margin records + ingestion registry. The
+// SettlementUploader invokes reprocessSettlement right after each upload.
+// See functions/src/settlements/ingest.ts and docs/data-intake-design.md.
+//
+// PLAN B (2026-11-07): the onSettlementUpload storage trigger is
+// deliberately NOT exported here, so it is not part of the deployed
+// function surface. Deploying it failed in GitHub Actions runs 78–85
+// ("Can't find the storage bucket region" — firebase-tools cannot
+// resolve the default bucket's region for the gen2 storage trigger
+// through the deploy credential; pinning the bucket name in ingest.ts
+// did not fix it, and the console/IAM route is closed by the user's
+// no-2SV decision). The trigger code stays intact in
+// settlements/ingest.ts; to re-enable it once the bucket-region lookup
+// works for the deploy credential, add onSettlementUpload back to this
+// export line and redeploy.
+export { reprocessSettlement } from "./settlements/ingest";
