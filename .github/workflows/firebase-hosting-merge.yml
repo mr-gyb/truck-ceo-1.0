@@ -62,3 +62,16 @@ jobs:
       - name: Deploy Firestore rules (non-blocking)
         continue-on-error: true
         run: npx -y firebase-tools@latest deploy --only firestore:rules --project truck-ceo
+      # Storage rules deploy (added 2026-11-07, non-blocking like the
+      # Firestore rules step above): ships storage.rules, which
+      # tenant-isolates businesses/{bid}/settlement-uploads and
+      # businesses/{bid}/csv-uploads plus driver-photos/{bid}/... to
+      # the business named in the caller's users doc. The deployer
+      # service account's permission for Storage rules is unknown, so
+      # until that is confirmed a failure here must never block
+      # functions or hosting. NOTE: a successful run REPLACES the
+      # console-configured Storage rules for the whole bucket —
+      # storage.rules covers every client Storage path the app uses.
+      - name: Deploy Storage rules (non-blocking)
+        continue-on-error: true
+        run: npx -y firebase-tools@latest deploy --only storage --project truck-ceo
