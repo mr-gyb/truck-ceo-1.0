@@ -124,10 +124,15 @@ async function queueException(
 }
 
 /**
- * Core ingest: download one Storage object, extract, parse, write.
- * Shared by the Storage trigger and the owner-callable reprocess path.
+ * Core ingest (inner): download one Storage object, extract, parse,
+ * write. Shared by the Storage trigger and the owner-callable reprocess
+ * path via the guarded ingestSettlementObject wrapper below. The
+ * extract/parse stage returns its failures as IngestResult; the
+ * post-parse stage (route resolution read, batch write, margin merge,
+ * review queueing) can still THROW — callers must go through the
+ * wrapper, which converts those throws into structured results.
  */
-export async function ingestSettlementObject(
+async function ingestSettlementObjectInner(
   bucket: string,
   objectName: string,
 ): Promise<IngestResult> {
@@ -148,11 +153,18 @@ export async function ingestSettlementObject(
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     logger.error('ingest: extract/parse failed', { objectName, message });
-    await queueException(businessId, `Settlement ingest failed for ${fileName}: ${message}`, {
-      storagePath,
-      fileName,
-      error: message,
-    });
+    // Best effort only: if the queue write itself is what is broken in
+    // the runtime, it must never mask the original parse error — the
+    // returned exception is the caller's only reliable surface.
+    try {
+      await queueException(businessId, `Settlement ingest failed for ${fileName}: ${message}`, {
+        storagePath,
+        fileName,
+        error: message,
+      });
+    } catch (qe) {
+      logger.error('ingest: exception queue write failed (extract/parse path)', { objectName, qe });
+    }
     return { ok: false, exception: message };
   }
 
@@ -257,8 +269,51 @@ export async function ingestSettlementObject(
     totalCharged,
     recordPath,
     registryId: finalRegistry.id,
-    exception: finalRegistry.status === 'needs_review' ? finalRegistry.discrepancy : undefined,
+    // A non-validated result ALWAYS carries its reason: needs_review
+    // carries the discrepancy; any other terminal status names itself,
+    // so the uploader never has to render a bare "Processing failed."
+    exception:
+      finalRegistry.status === 'needs_review'
+        ? finalRegistry.discrepancy || 'flagged for review (no discrepancy text recorded)'
+        : finalRegistry.status === 'validated'
+          ? undefined
+          : `unexpected ingest status: ${finalRegistry.status}`,
   };
+}
+
+/**
+ * Guarded ingest entry — the ONLY path callers use. Diagnosis
+ * (2026-11-07): the live smoke test failed deterministically with zero
+ * exception-queue entries, the signature of a throw in the post-parse
+ * section (whose Firestore writes are also the queue's writes, so a
+ * broken write layer leaves no trace anywhere the app can show). This
+ * wrapper makes that class of failure VISIBLE: the error is queued on a
+ * best-effort basis AND returned to the caller as the exception text,
+ * instead of escaping as an opaque framework 'internal'.
+ */
+export async function ingestSettlementObject(
+  bucket: string,
+  objectName: string,
+): Promise<IngestResult> {
+  try {
+    return await ingestSettlementObjectInner(bucket, objectName);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    logger.error('ingest: post-parse failure', { objectName, message });
+    const parsed = parseUploadPath(objectName);
+    if (parsed) {
+      try {
+        await queueException(
+          parsed.businessId,
+          `Settlement ingest failed for ${parsed.fileName}: ${message}`,
+          { storagePath: objectName, fileName: parsed.fileName, error: message },
+        );
+      } catch (qe) {
+        logger.error('ingest: exception queue write failed (post-parse path)', { objectName, qe });
+      }
+    }
+    return { ok: false, exception: `ingest failed after parse: ${message}` };
+  }
 }
 
 /**
@@ -311,11 +366,23 @@ export const reprocessSettlement = onCall(async (request) => {
   const storagePath = String(request.data?.storagePath || '');
   const parsed = parseUploadPath(storagePath);
   if (!parsed) throw new HttpsError('invalid-argument', 'storagePath must be a settlement upload path.');
-  const userSnap = await db().collection('users').doc(request.auth.uid).get();
-  const u = userSnap.exists ? (userSnap.data() as { role?: string; businessId?: string }) : null;
-  if (!u || u.role !== 'business_owner' || u.businessId !== parsed.businessId) {
-    throw new HttpsError('permission-denied', 'Only the business owner can reprocess settlement uploads.');
+  try {
+    const userSnap = await db().collection('users').doc(request.auth.uid).get();
+    const u = userSnap.exists ? (userSnap.data() as { role?: string; businessId?: string }) : null;
+    if (!u || u.role !== 'business_owner' || u.businessId !== parsed.businessId) {
+      throw new HttpsError('permission-denied', 'Only the business owner can reprocess settlement uploads.');
+    }
+    const bucket = admin.storage().bucket(STORAGE_BUCKET).name;
+    return await ingestSettlementObject(bucket, storagePath);
+  } catch (e) {
+    // Deliberate HttpsErrors pass through with their message intact.
+    // Anything else (e.g. the Firestore read above failing in the
+    // function runtime) would otherwise reach the client as the bare
+    // framework word 'internal' — rethrow WITH the real message so the
+    // uploader can show what actually failed (diagnosis 2026-11-07).
+    if (e instanceof HttpsError) throw e;
+    const message = e instanceof Error ? e.message : String(e);
+    logger.error('reprocessSettlement: unexpected failure', { storagePath, message });
+    throw new HttpsError('internal', `Settlement processing failed: ${message}`);
   }
-  const bucket = admin.storage().bucket(STORAGE_BUCKET).name;
-  return ingestSettlementObject(bucket, storagePath);
 });
