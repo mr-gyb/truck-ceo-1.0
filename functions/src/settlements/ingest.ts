@@ -2,11 +2,16 @@
  * Flowers IDP ingest wrapper — the deploy-time half of the data-intake
  * pipeline (the parser in ./flowersIdp.ts + ./index.ts is pure).
  *
- * Flow: a portal PDF lands in Cloud Storage at
+ * Flow (Plan B, 2026-11-07): a portal PDF lands in Cloud Storage at
  *   businesses/{businessId}/settlement-uploads/{fileName}
- * (uploaded from the DataHub SettlementUploader) -> onSettlementUpload
- * downloads it -> extractPdfText (./pdfText.ts) -> parseFlowersDocument
- * -> writes the structured record + ingestion registry entry (Admin SDK).
+ * (uploaded from the DataHub SettlementUploader) -> the uploader invokes
+ * the owner-only `reprocessSettlement` callable -> it downloads the file
+ * -> extractPdfText (./pdfText.ts) -> parseFlowersDocument -> writes the
+ * structured record + ingestion registry entry (Admin SDK). The
+ * onObjectFinalized trigger below (onSettlementUpload) is the hands-free
+ * variant of the same entry point; it is retained but NOT exported from
+ * src/index.ts, so it is not deployed — see the Plan B note at the
+ * trigger for why, and what re-enabling it takes.
  *
  * Identity comes from the DOCUMENT, never the file name: the route is the
  * distributor/route number printed in the PDF, resolved to the business's
@@ -36,10 +41,14 @@ import { IngestionRegistryEntry } from './types';
 
 const UPLOAD_PREFIX = 'settlement-uploads';
 
-/** The project's default storage bucket, named explicitly: firebase-tools
- *  cannot resolve the default bucket's region at deploy time for the
- *  storage trigger below ("Can't find the storage bucket region"), so the
- *  bucket must be pinned here rather than inferred. */
+/** The project's default storage bucket, named explicitly so the
+ *  reprocess callable (and the dormant trigger below, if re-enabled)
+ *  never depends on the Admin SDK's ambient bucket. NOTE: pinning the
+ *  bucket here did NOT fix the deploy failure — firebase-tools still
+ *  could not resolve the bucket region for the gen2 storage trigger
+ *  ("Can't find the storage bucket region", Actions runs 78–85). That
+ *  lookup is the trigger's deploy-time problem, not this constant's;
+ *  Plan B removes the trigger from the deployed surface instead. */
 const STORAGE_BUCKET = 'truck-ceo.firebasestorage.app';
 
 const db = () => admin.firestore();
@@ -57,6 +66,9 @@ export interface IngestResult {
   routeNumber?: string;
   weekEnding?: string;
   status?: string;
+  /** Total product charged (statements only — margin detail and shrink
+   *  records carry no single charged total). */
+  totalCharged?: number;
   recordPath?: string;
   registryId?: string;
   exception?: string;
@@ -219,12 +231,21 @@ export async function ingestSettlementObject(
     );
   }
 
+  // Statements carry the week's total product charged; margin detail and
+  // shrink records have no single charged total, so it stays undefined.
+  const totalCharged =
+    output.docType === 'flowers_master_statement' ||
+    output.docType === 'flowers_distributor_statement'
+      ? output.record.computed.productCharged
+      : undefined;
+
   logger.info('ingest: processed', {
     objectName,
     docType: output.docType,
     routeNumber,
     weekEnding,
     status: finalRegistry.status,
+    totalCharged: totalCharged ?? null,
     recordPath: recordPath || null,
   });
   return {
@@ -233,6 +254,7 @@ export async function ingestSettlementObject(
     routeNumber,
     weekEnding,
     status: finalRegistry.status,
+    totalCharged,
     recordPath,
     registryId: finalRegistry.id,
     exception: finalRegistry.status === 'needs_review' ? finalRegistry.discrepancy : undefined,
@@ -242,6 +264,21 @@ export async function ingestSettlementObject(
 /**
  * Storage trigger: fires on every finalized object in the default bucket;
  * only businesses/{bid}/settlement-uploads/*.pdf objects are processed.
+ *
+ * PLAN B (2026-11-07) — DEFINED BUT NOT DEPLOYED. `firebase deploy --only
+ * functions` failed on this trigger in Actions runs 78–85 with "Can't
+ * find the storage bucket region": deploying a gen2 storage trigger
+ * makes firebase-tools resolve the bucket's region through the deploy
+ * credential, and that lookup fails — pinning the bucket name above did
+ * not change it, and the console/IAM route to investigate is closed by
+ * the user's decision (no 2SV, no console). So src/index.ts deliberately
+ * does NOT re-export this symbol, which keeps it out of the deployed
+ * function surface; processing runs through the reprocessSettlement
+ * callable instead (the SettlementUploader invokes it after each
+ * upload). To re-enable the trigger later: (1) make the bucket-region
+ * lookup succeed for the deploy credential (IAM/console work), (2) add
+ * onSettlementUpload back to the export line in src/index.ts, (3)
+ * redeploy and confirm the trigger is created.
  */
 export const onSettlementUpload = onObjectFinalized({ bucket: STORAGE_BUCKET }, async (event: StorageEvent) => {
   const name = event.data.name || '';
@@ -261,8 +298,13 @@ export const onSettlementUpload = onObjectFinalized({ bucket: STORAGE_BUCKET }, 
 });
 
 /**
- * Owner-callable reprocess for an already-uploaded file (e.g. after a
- * parser fix): reprocessSettlement({ storagePath }) -> IngestResult.
+ * Owner-callable ingest entry point: reprocessSettlement({ storagePath })
+ * -> IngestResult. Under Plan B this is THE processing path — the
+ * SettlementUploader invokes it immediately after each PDF upload lands
+ * in Storage — and it doubles as the manual reprocess for an
+ * already-uploaded file (e.g. after a parser fix). Owner-only: the
+ * caller's users/{uid} doc must carry role 'business_owner' and the
+ * businessId embedded in the storage path.
  */
 export const reprocessSettlement = onCall(async (request) => {
   if (!request.auth) throw new HttpsError('unauthenticated', 'Sign-in required.');
