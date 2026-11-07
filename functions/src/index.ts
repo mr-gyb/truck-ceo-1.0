@@ -2127,9 +2127,11 @@ export const saveFeedCredentials = onRequest(
 );
 
 // ─── Flowers IDP settlement intake (added 2026-11-07) ─────────────────────
-// Owner-callable ingest for businesses/{bid}/settlement-uploads/*.pdf ->
-// parsed settlement/shrink/margin records + ingestion registry. The
-// SettlementUploader invokes reprocessSettlement right after each upload.
+// Owner-callable ingest -> parsed settlement/shrink/margin records +
+// ingestion registry. PLAN C (current): the SettlementUploader sends
+// PDF bytes to ingestSettlementPdf (client Storage writes are denied by
+// the bucket's rules and the deploy credential cannot publish rules).
+// reprocessSettlement remains for files already in Storage.
 // See functions/src/settlements/ingest.ts and docs/data-intake-design.md.
 //
 // PLAN B (2026-11-07): the onSettlementUpload storage trigger is
@@ -2143,4 +2145,4 @@ export const saveFeedCredentials = onRequest(
 // settlements/ingest.ts; to re-enable it once the bucket-region lookup
 // works for the deploy credential, add onSettlementUpload back to this
 // export line and redeploy.
-export { reprocessSettlement } from "./settlements/ingest";
+export { reprocessSettlement, ingestSettlementPdf } from "./settlements/ingest";
