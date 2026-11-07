@@ -135,20 +135,25 @@ route subtotal 5,262 pcs / $23,711.29.
    totals** — Master W43 $57,310.44 tie-out, stales 13.7 / 8.6 / 6.0,
    Territory Payment $572.25 → $1,219.99, margin subtotals exact. Log:
    `~/workspace/goals/truckceo-driver-interface-rollout/files/truckceo-flowers-adapter-acceptance-2026-11-07.txt`.
-2. **Ingest wrapper — BUILT.** `functions/src/settlements/ingest.ts`,
-   exported from `functions/src/index.ts` as `onSettlementUpload`
-   (Storage trigger on `businesses/{bid}/settlement-uploads/*.pdf`,
-   default bucket) and `reprocessSettlement` (owner-only callable).
+2. **Ingest wrapper — BUILT.** `functions/src/settlements/ingest.ts`.
+   Processing entry point is `reprocessSettlement` (owner-only callable),
+   exported from `functions/src/index.ts` and invoked by the upload
+   surface immediately after each PDF lands in Storage (Plan B — see
+   "Deploy attempts & Plan B" below; the `onSettlementUpload` Storage
+   trigger is written but deliberately not exported/deployed).
    Route/business resolve from the document's printed numbers, never
    the file name; masters land under the master route number (13438).
    Records + registry entries write via Admin SDK batch; margin-detail
    store rows also merge onto the week's settlement record when present.
    Parse failures, discrepancies, and unresolvable routes queue to
-   `dataFeedRequests` + `agentInbox`. Owner upload surface:
-   `components/SettlementUploader.tsx`, mounted in DataHub's Data Import
-   section. NOTE: Firestore write paths are compile-verified, not
-   emulator-tested (no firebase CLI on the build VM) — first live upload
-   should be one known fixture with a registry spot-check.
+   `dataFeedRequests` + `agentInbox`. `reprocessSettlement` returns the
+   IngestResult (status, docType, routeNumber, weekEnding, and — for
+   statements — total product charged), which the uploader renders
+   per file. Owner upload surface: `components/SettlementUploader.tsx`,
+   mounted in DataHub's Data Import section. NOTE: Firestore write
+   paths are compile-verified, not emulator-tested (no firebase CLI on
+   the build VM) — first live upload should be one known fixture with a
+   registry spot-check.
 3. **Firestore rules**: the settlements/registry blocks are in
    `firestore.rules` (a `marginDetails` block was added 2026-11-07 for
    the margin provenance copies) but rules are NOT auto-deployed
@@ -158,6 +163,51 @@ route subtotal 5,262 pcs / $23,711.29.
    established GitHub web-upload flow after review — do not push local main.
 5. **Node 22**: already set in the working tree (firebase.json runtime
    nodejs22, functions engines node 22) — rides along with the next deploy.
+
+## Deploy attempts & Plan B (2026-11-07)
+
+Deploy = GitHub Actions `firebase deploy --only functions` (the repo's
+established path; no firebase CLI on the build VM). Attempts with the
+original surface (callables + the new gen2 Storage trigger
+`onSettlementUpload`):
+
+- **Runs 78–84 — FAILED** at the functions step: `Error: Can't find the
+  storage bucket region`. App build, functions `npm ci`, and packaging
+  all passed; the deploy failed immediately on the storage trigger's
+  bucket-region lookup. Hosting/rules steps never ran.
+- **Bucket pin — did NOT fix it.** `STORAGE_BUCKET =
+  'truck-ceo.firebasestorage.app'` was pinned on the trigger
+  (commit 6d2f601); **run 85 failed with the identical error** in 54s.
+- Pre-feature runs (Oct 13, #74–77) deployed functions fine — the only
+  new deploy surface is the storage trigger, whose deploy requires
+  firebase-tools to resolve the bucket region through the deploy
+  credential. The console/IAM route to fix that lookup is closed by the
+  user's decision (no 2SV enrolment, no console sign-in).
+
+**Plan B (adopted 2026-11-07): no storage trigger in the deployed
+surface.** `functions/src/index.ts` exports only `askAssistant`,
+`saveFeedCredentials`, and `reprocessSettlement` (verified against the
+compiled `lib/index.js`: 2 HTTPS + 1 callable, no event trigger). The
+trigger code remains intact in `functions/src/settlements/ingest.ts`
+(exported from that module, not re-exported by the entry point), and
+`ingestSettlementObject` — the shared core — is untouched. Processing
+flow: SettlementUploader uploads the PDF, then invokes the owner-only
+`reprocessSettlement({ storagePath })` callable and renders its
+IngestResult per file (validated / needs review / failed, with route,
+week ending, and charged total for statements). Same end-to-end result
+as the trigger for app uploads; the honest trade-off is that a PDF
+placed in Storage outside the app does not auto-process until someone
+runs reprocess on it (the uploader path covers the real workflow).
+
+**Re-enabling the trigger later requires:** (1) the bucket-region
+lookup succeeding for the deploy credential — i.e., the default
+bucket's location resolvable via the Storage API with the deployer
+service account's permissions, which likely needs the GCP console/IAM
+work currently gated by the no-2SV decision; (2) adding
+`onSettlementUpload` back to the export line in
+`functions/src/index.ts`; (3) a functions redeploy, confirming the
+trigger is created. No other code changes — the uploader's callable
+invocation can stay as the belt-and-suspenders path.
 
 ## Standing display rule (user, 2026-11-07)
 
