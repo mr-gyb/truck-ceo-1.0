@@ -2,16 +2,25 @@
  * Flowers IDP ingest wrapper — the deploy-time half of the data-intake
  * pipeline (the parser in ./flowersIdp.ts + ./index.ts is pure).
  *
- * Flow (Plan B, 2026-11-07): a portal PDF lands in Cloud Storage at
+ * Flow (Plan C, 2026-11-07 — current): the DataHub SettlementUploader
+ * sends each PDF's bytes directly to the owner-only `ingestSettlementPdf`
+ * callable as base64. The function derives the business from the
+ * caller's users/{uid} doc, persists the raw PDF to
  *   businesses/{businessId}/settlement-uploads/{fileName}
- * (uploaded from the DataHub SettlementUploader) -> the uploader invokes
- * the owner-only `reprocessSettlement` callable -> it downloads the file
- * -> extractPdfText (./pdfText.ts) -> parseFlowersDocument -> writes the
- * structured record + ingestion registry entry (Admin SDK). The
+ * via the Admin SDK (server-side writes bypass the bucket's client
+ * rules), then runs the shared bytes core below: extractPdfText
+ * (./pdfText.ts) -> parseFlowersDocument -> structured record +
+ * ingestion registry entry (Admin SDK). Plan C exists because the
+ * bucket has no usable client Storage rules and the deploy credential
+ * cannot publish rules (HTTP 403), so the Plan B client uploadBytes
+ * step failed live with storage/unauthorized.
+ *
+ * Plan B paths retained: `reprocessSettlement({ storagePath })` still
+ * reprocesses a file already in Storage through the same core, and the
  * onObjectFinalized trigger below (onSettlementUpload) is the hands-free
- * variant of the same entry point; it is retained but NOT exported from
- * src/index.ts, so it is not deployed — see the Plan B note at the
- * trigger for why, and what re-enabling it takes.
+ * variant; it is retained but NOT exported from src/index.ts, so it is
+ * not deployed — see the Plan B note at the trigger for why, and what
+ * re-enabling it takes.
  *
  * Identity comes from the DOCUMENT, never the file name: the route is the
  * distributor/route number printed in the PDF, resolved to the business's
@@ -72,7 +81,17 @@ export interface IngestResult {
   recordPath?: string;
   registryId?: string;
   exception?: string;
+  /** Plan C only: the Storage path the raw PDF was persisted to via the
+   *  Admin SDK, when that best-effort write succeeded. Absent when the
+   *  write failed (records are still written) or on the Storage paths. */
+  storedPath?: string;
 }
+
+/** Plan C payload cap: max decoded PDF size accepted by
+ *  ingestSettlementPdf. IDP statement PDFs run well under 1 MB; 7 MB
+ *  leaves the base64-inflated callable request (~9.3 MB) under the
+ *  platform's 10 MB callable payload limit. */
+export const MAX_SETTLEMENT_PDF_BYTES = 7 * 1024 * 1024;
 
 function parseUploadPath(objectName: string): { businessId: string; fileName: string } | null {
   const parts = objectName.split('/');
@@ -124,27 +143,30 @@ async function queueException(
 }
 
 /**
- * Core ingest (inner): download one Storage object, extract, parse,
- * write. Shared by the Storage trigger and the owner-callable reprocess
- * path via the guarded ingestSettlementObject wrapper below. The
- * extract/parse stage returns its failures as IngestResult; the
- * post-parse stage (route resolution read, batch write, margin merge,
- * review queueing) can still THROW — callers must go through the
- * wrapper, which converts those throws into structured results.
+ * Core ingest (inner), bytes form: extract, parse, write for one PDF
+ * already in memory. This is THE processing core — the Storage-object
+ * path (trigger + reprocessSettlement) downloads and delegates here,
+ * and the Plan C callable (ingestSettlementPdf) calls it directly, so
+ * every entry point produces identical records. The extract/parse stage
+ * returns its failures as IngestResult; the post-parse stage (route
+ * resolution read, batch write, margin merge, review queueing) can
+ * still THROW — callers must go through a guarded wrapper
+ * (ingestSettlementObject / ingestSettlementBytes), which converts
+ * those throws into structured results.
+ *
+ * `storagePath` is the canonical businesses/{bid}/settlement-uploads/
+ * {fileName} path recorded as provenance; on the Plan C path the raw
+ * bytes are persisted there via the Admin SDK before this runs.
  */
-async function ingestSettlementObjectInner(
-  bucket: string,
-  objectName: string,
+async function ingestSettlementBytesInner(
+  businessId: string,
+  fileName: string,
+  storagePath: string,
+  pdfBytes: Uint8Array,
 ): Promise<IngestResult> {
-  const parsed = parseUploadPath(objectName);
-  if (!parsed) return { ok: false, exception: `not a settlement upload path: ${objectName}` };
-  const { businessId, fileName } = parsed;
-  const storagePath = objectName;
-
   let output: FlowersParseOutput;
   try {
-    const [buffer] = await admin.storage().bucket(bucket).file(objectName).download();
-    const text = await extractPdfText(new Uint8Array(buffer));
+    const text = await extractPdfText(pdfBytes);
     output = parseFlowersDocument(text, {
       businessId,
       provenance: { kind: 'file', fileName, portal: 'flowers-idp-onbase', storagePath },
@@ -152,7 +174,7 @@ async function ingestSettlementObjectInner(
     });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    logger.error('ingest: extract/parse failed', { objectName, message });
+    logger.error('ingest: extract/parse failed', { objectName: storagePath, message });
     // Best effort only: if the queue write itself is what is broken in
     // the runtime, it must never mask the original parse error — the
     // returned exception is the caller's only reliable surface.
@@ -163,7 +185,7 @@ async function ingestSettlementObjectInner(
         error: message,
       });
     } catch (qe) {
-      logger.error('ingest: exception queue write failed (extract/parse path)', { objectName, qe });
+      logger.error('ingest: exception queue write failed (extract/parse path)', { objectName: storagePath, qe });
     }
     return { ok: false, exception: message };
   }
@@ -252,7 +274,7 @@ async function ingestSettlementObjectInner(
       : undefined;
 
   logger.info('ingest: processed', {
-    objectName,
+    objectName: storagePath,
     docType: output.docType,
     routeNumber,
     weekEnding,
@@ -295,22 +317,52 @@ export async function ingestSettlementObject(
   bucket: string,
   objectName: string,
 ): Promise<IngestResult> {
+  const parsed = parseUploadPath(objectName);
+  if (!parsed) return { ok: false, exception: `not a settlement upload path: ${objectName}` };
+  let buffer: Buffer;
   try {
-    return await ingestSettlementObjectInner(bucket, objectName);
+    [buffer] = await admin.storage().bucket(bucket).file(objectName).download();
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    logger.error('ingest: post-parse failure', { objectName, message });
-    const parsed = parseUploadPath(objectName);
-    if (parsed) {
-      try {
-        await queueException(
-          parsed.businessId,
-          `Settlement ingest failed for ${parsed.fileName}: ${message}`,
-          { storagePath: objectName, fileName: parsed.fileName, error: message },
-        );
-      } catch (qe) {
-        logger.error('ingest: exception queue write failed (post-parse path)', { objectName, qe });
-      }
+    logger.error('ingest: storage download failed', { objectName, message });
+    try {
+      await queueException(
+        parsed.businessId,
+        `Settlement ingest failed for ${parsed.fileName}: ${message}`,
+        { storagePath: objectName, fileName: parsed.fileName, error: message },
+      );
+    } catch (qe) {
+      logger.error('ingest: exception queue write failed (download path)', { objectName, qe });
+    }
+    return { ok: false, exception: message };
+  }
+  return ingestSettlementBytes(parsed.businessId, parsed.fileName, objectName, new Uint8Array(buffer));
+}
+
+/**
+ * Guarded bytes entry — the Plan C path. Same contract as
+ * ingestSettlementObject: post-parse throws are queued best-effort AND
+ * returned as structured results, never as opaque framework errors.
+ */
+export async function ingestSettlementBytes(
+  businessId: string,
+  fileName: string,
+  storagePath: string,
+  pdfBytes: Uint8Array,
+): Promise<IngestResult> {
+  try {
+    return await ingestSettlementBytesInner(businessId, fileName, storagePath, pdfBytes);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    logger.error('ingest: post-parse failure', { objectName: storagePath, message });
+    try {
+      await queueException(
+        businessId,
+        `Settlement ingest failed for ${fileName}: ${message}`,
+        { storagePath, fileName, error: message },
+      );
+    } catch (qe) {
+      logger.error('ingest: exception queue write failed (post-parse path)', { objectName: storagePath, qe });
     }
     return { ok: false, exception: `ingest failed after parse: ${message}` };
   }
@@ -383,6 +435,88 @@ export const reprocessSettlement = onCall(async (request) => {
     if (e instanceof HttpsError) throw e;
     const message = e instanceof Error ? e.message : String(e);
     logger.error('reprocessSettlement: unexpected failure', { storagePath, message });
+    throw new HttpsError('internal', `Settlement processing failed: ${message}`);
+  }
+});
+
+/**
+ * Owner-callable direct ingest (Plan C, 2026-11-07):
+ * ingestSettlementPdf({ filename, contentBase64 }) -> IngestResult.
+ *
+ * The SettlementUploader sends the PDF bytes in the request instead of
+ * writing to Storage from the client — the bucket's client rules deny
+ * that write (storage/unauthorized, verified live) and the deploy
+ * credential cannot publish replacement rules (HTTP 403). The business
+ * is derived from the caller's users/{uid} doc (same owner check as
+ * reprocessSettlement); the client never names a business. The raw PDF
+ * is persisted to the canonical settlement-uploads path via the Admin
+ * SDK (best effort — server-side writes bypass client rules) so the
+ * stored-file record and reprocessSettlement keep working; the
+ * Firestore records written by the shared core are the deliverable and
+ * do not depend on that write.
+ */
+export const ingestSettlementPdf = onCall(async (request) => {
+  if (!request.auth) throw new HttpsError('unauthenticated', 'Sign-in required.');
+  const filename = String(request.data?.filename || '');
+  const contentBase64 = String(request.data?.contentBase64 || '');
+  try {
+    const userSnap = await db().collection('users').doc(request.auth.uid).get();
+    const u = userSnap.exists ? (userSnap.data() as { role?: string; businessId?: string }) : null;
+    if (!u || u.role !== 'business_owner' || !u.businessId) {
+      throw new HttpsError('permission-denied', 'Only the business owner can upload settlement PDFs.');
+    }
+    const businessId = u.businessId;
+
+    const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+    if (!safeName || !/\.pdf$/i.test(safeName)) {
+      throw new HttpsError('invalid-argument', 'filename must be a PDF file name.');
+    }
+    if (!contentBase64) {
+      throw new HttpsError('invalid-argument', 'contentBase64 is required.');
+    }
+    // Reject on the encoded length before decoding: base64 inflates by
+    // 4/3, so anything past this cannot decode under the cap.
+    if (contentBase64.length > Math.ceil(MAX_SETTLEMENT_PDF_BYTES / 3) * 4 + 4) {
+      throw new HttpsError(
+        'invalid-argument',
+        `PDF too large — the limit is ${Math.floor(MAX_SETTLEMENT_PDF_BYTES / (1024 * 1024))} MB.`,
+      );
+    }
+    const buffer = Buffer.from(contentBase64.replace(/\s/g, ''), 'base64');
+    if (buffer.length === 0 || buffer.length > MAX_SETTLEMENT_PDF_BYTES) {
+      throw new HttpsError(
+        'invalid-argument',
+        `PDF too large — the limit is ${Math.floor(MAX_SETTLEMENT_PDF_BYTES / (1024 * 1024))} MB.`,
+      );
+    }
+    if (buffer.subarray(0, 5).toString('latin1') !== '%PDF-') {
+      throw new HttpsError('invalid-argument', 'That file is not a PDF.');
+    }
+
+    const storagePath = `businesses/${businessId}/${UPLOAD_PREFIX}/${safeName}`;
+
+    // Best-effort raw-file persistence via the Admin SDK. A failure
+    // here must not block the records — log it and continue.
+    let storedPath: string | undefined;
+    try {
+      await admin.storage().bucket(STORAGE_BUCKET).file(storagePath).save(buffer, {
+        contentType: 'application/pdf',
+        resumable: false,
+      });
+      storedPath = storagePath;
+    } catch (se) {
+      logger.warn('ingestSettlementPdf: raw PDF persistence failed (continuing)', {
+        storagePath,
+        message: se instanceof Error ? se.message : String(se),
+      });
+    }
+
+    const result = await ingestSettlementBytes(businessId, safeName, storagePath, new Uint8Array(buffer));
+    return storedPath ? { ...result, storedPath } : result;
+  } catch (e) {
+    if (e instanceof HttpsError) throw e;
+    const message = e instanceof Error ? e.message : String(e);
+    logger.error('ingestSettlementPdf: unexpected failure', { filename, message });
     throw new HttpsError('internal', `Settlement processing failed: ${message}`);
   }
 });
