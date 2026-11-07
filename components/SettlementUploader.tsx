@@ -1,24 +1,25 @@
 import React, { useState } from 'react';
-import { ref, uploadBytes } from 'firebase/storage';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { useAuth } from '../contexts/AuthContext';
-import { storage } from '../services/firebaseConfig';
 
 /**
  * Flowers IDP settlement upload (owner-only).
  *
- * Flow (Plan B, 2026-11-07): each selected PDF is uploaded to
- *   businesses/{bid}/settlement-uploads/{fileName}
- * and this component then immediately invokes the owner-only
- * `reprocessSettlement` callable, which downloads the file server-side
- * and runs extract -> parse -> reconcile -> settlement/shrink/margin
- * record + ingestion registry entry. The per-file result below is the
- * callable's actual return — validated, queued for review, or failed —
- * never just "upload received". (The hands-free Storage trigger variant
- * exists in the backend but is not deployed: its deploy fails on a
- * bucket-region lookup — see functions/src/settlements/ingest.ts.)
+ * Flow (Plan C, 2026-11-07): each selected PDF is read in the browser
+ * and sent as base64 to the owner-only `ingestSettlementPdf` callable,
+ * which persists the raw file server-side (Admin SDK) and runs
+ * extract -> parse -> reconcile -> settlement/shrink/margin record +
+ * ingestion registry entry. There is NO client Storage write: the
+ * bucket's client rules deny it (storage/unauthorized, verified live)
+ * and the deploy credential cannot publish replacement rules — Plan B's
+ * uploadBytes + reprocessSettlement path died on exactly that. The
+ * per-file result below is the callable's actual return — validated,
+ * queued for review, or failed — never just "upload received".
  * Anything that doesn't reconcile is queued for review server-side; it
- * never silently disappears.
+ * never silently disappears. EVERY loop path (success, callable error,
+ * read error, oversize, non-PDF) publishes its outcome before moving
+ * on — a counted file with no rendered row is the bug this component
+ * already shipped once (audit 2026-11-07); do not reintroduce it.
  */
 
 /** Mirrors IngestResult in functions/src/settlements/ingest.ts. */
@@ -30,6 +31,23 @@ interface ProcessResult {
   status?: string;
   totalCharged?: number;
   exception?: string;
+  /** Set when the function persisted the raw PDF to Storage. */
+  storedPath?: string;
+}
+
+/** Mirrors MAX_SETTLEMENT_PDF_BYTES in functions/src/settlements/ingest.ts. */
+const MAX_PDF_BYTES = 7 * 1024 * 1024;
+
+/** Base64-encode an ArrayBuffer in chunks (avoids call-stack limits
+ *  from spreading a whole file into String.fromCharCode at once). */
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
 }
 
 type OutcomeState = 'validated' | 'review' | 'failed' | 'skipped';
@@ -61,15 +79,16 @@ export const SettlementUploader: React.FC = () => {
     const files: File[] = event.target.files ? Array.from(event.target.files) : [];
     if (!files.length || !userProfile?.businessId) return;
 
-    const businessId = userProfile.businessId;
+    // No businessId is sent: the function derives it from the caller's
+    // users/{uid} record server-side.
     setBusy(true);
     setMessage('');
     setOutcomes([]);
 
-    const processSettlement = httpsCallable<{ storagePath: string }, ProcessResult>(
-      getFunctions(),
-      'reprocessSettlement'
-    );
+    const ingestPdf = httpsCallable<
+      { filename: string; contentBase64: string },
+      ProcessResult
+    >(getFunctions(), 'ingestSettlementPdf');
 
     const results: FileOutcome[] = [];
     for (const file of files) {
@@ -82,23 +101,30 @@ export const SettlementUploader: React.FC = () => {
         setOutcomes([...results]);
         continue;
       }
-      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-      const storagePath = `businesses/${businessId}/settlement-uploads/${safeName}`;
-      try {
-        await uploadBytes(ref(storage, storagePath), file);
-      } catch (error: any) {
-        console.error('Settlement upload error:', error);
-        const code = error?.code ? `${error.code}: ` : '';
+      if (file.size > MAX_PDF_BYTES) {
         results.push({
           fileName: file.name,
           state: 'failed',
-          detail: `Upload failed: ${code}${error?.message || 'check your connection and try again.'}`,
+          detail: `File too large: ${(file.size / (1024 * 1024)).toFixed(1)} MB — the limit is 7 MB.`,
+        });
+        setOutcomes([...results]);
+        continue;
+      }
+      let contentBase64: string;
+      try {
+        contentBase64 = arrayBufferToBase64(await file.arrayBuffer());
+      } catch (error: any) {
+        console.error('Settlement file read error:', error);
+        results.push({
+          fileName: file.name,
+          state: 'failed',
+          detail: `Couldn't read the file: ${error?.message || 'unknown error'}`,
         });
         setOutcomes([...results]);
         continue;
       }
       try {
-        const { data } = await processSettlement({ storagePath });
+        const { data } = await ingestPdf({ filename: file.name, contentBase64 });
         const label = (data.docType && DOC_TYPE_LABELS[data.docType]) || 'Settlement document';
         const where = [
           data.routeNumber ? `Route ${data.routeNumber}` : null,
@@ -148,9 +174,7 @@ export const SettlementUploader: React.FC = () => {
         results.push({
           fileName: file.name,
           state: 'failed',
-          detail:
-            `Uploaded, but processing couldn't run: ${code}${error?.message || 'unknown error'} ` +
-            'The file is stored and can be reprocessed later.',
+          detail: `Processing couldn't run: ${code}${error?.message || 'unknown error'}`,
         });
       }
       // Show results as they land, not only at the end of the batch.
