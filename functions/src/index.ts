@@ -2125,3 +2125,10 @@ export const saveFeedCredentials = onRequest(
     }
   }
 );
+
+// ─── Flowers IDP settlement intake (added 2026-11-07) ─────────────────────
+// Storage trigger + owner-callable reprocess for businesses/{bid}/
+// settlement-uploads/*.pdf -> parsed settlement/shrink/margin records +
+// ingestion registry. See functions/src/settlements/ingest.ts and
+// docs/data-intake-design.md.
+export { onSettlementUpload, reprocessSettlement } from "./settlements/ingest";
