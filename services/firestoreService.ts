@@ -11,6 +11,7 @@ import {
 } from 'firebase/firestore';
 import { db } from './firebaseConfig';
 import { Product, Employee, Truck, SaleAlert, RouteTerritory, OperationalAlert } from '../types';
+import { sortRoutesForDisplay } from './routeOrdering';
 
 export class FirestoreService {
   constructor(private businessId: string) {}
@@ -73,7 +74,12 @@ export class FirestoreService {
   // ===== ROUTES =====
   async getRoutes(): Promise<RouteTerritory[]> {
     const snapshot = await getDocs(collection(db, `businesses/${this.businessId}/routes`));
-    return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as RouteTerritory));
+    const routes = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as RouteTerritory));
+    // Standing display rule (user, 2026-11-07): Flowers → CNR Bimbo → LMB.
+    // Sorted here, at the one fetch every route list flows through, so all
+    // consumers display in rule order. Display only — stored data untouched.
+    // See services/routeOrdering.ts.
+    return sortRoutesForDisplay(routes);
   }
 
   async getRoute(routeId: string): Promise<RouteTerritory | null> {
