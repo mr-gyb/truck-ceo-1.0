@@ -127,11 +127,18 @@ export const SettlementUploader: React.FC = () => {
         }
       } catch (error: any) {
         console.error('Settlement processing error:', error);
+        // Show the callable's ACTUAL error: the Firebase error code
+        // (e.g. functions/internal, functions/permission-denied,
+        // functions/unauthenticated) plus its message. The code is what
+        // separates "the function ran and failed" from "the call never
+        // reached the function" — message alone collapses both to a
+        // bare word like 'internal' (diagnosis 2026-11-07).
+        const code = error?.code ? `${error.code}: ` : '';
         results.push({
           fileName: file.name,
           state: 'failed',
           detail:
-            `Uploaded, but processing couldn't run: ${error?.message || 'unknown error'} ` +
+            `Uploaded, but processing couldn't run: ${code}${error?.message || 'unknown error'} ` +
             'The file is stored and can be reprocessed later.',
         });
       }
