@@ -74,6 +74,34 @@ export const SettlementUploader: React.FC = () => {
   const [message, setMessage] = useState('');
   const [messageType, setMessageType] = useState<'success' | 'warning' | 'error'>('success');
   const [outcomes, setOutcomes] = useState<FileOutcome[]>([]);
+  // Temporary diagnostics (2026-11-07): the "Connection test" button
+  // calls the light ingestPing callable (no settlements imports) and
+  // renders its result verbatim, bisecting the ingest callable's bare
+  // functions/internal failure: ping OK + ingest bare-internal points
+  // inside the settlements module; ping ALSO failing points at the
+  // platform. Remove once the pipeline is verified live.
+  const [pingBusy, setPingBusy] = useState(false);
+  const [pingResult, setPingResult] = useState('');
+
+  const handleConnectionTest = async () => {
+    setPingBusy(true);
+    setPingResult('');
+    try {
+      const ping = httpsCallable<Record<string, unknown>, { ok: boolean; ts: string }>(
+        getFunctions(),
+        'ingestPing'
+      );
+      const { data } = await ping({});
+      setPingResult(`Connection test OK — ingestPing returned ok=${data.ok} at ${data.ts}`);
+    } catch (error: any) {
+      console.error('Connection test error:', error);
+      // Exact code + message, verbatim under the button — the code is
+      // what separates "function ran and refused" from "never ran".
+      const code = error?.code ? `${error.code}: ` : '';
+      setPingResult(`Connection test failed: ${code}${error?.message || 'unknown error'}`);
+    }
+    setPingBusy(false);
+  };
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files: File[] = event.target.files ? Array.from(event.target.files) : [];
@@ -269,6 +297,20 @@ export const SettlementUploader: React.FC = () => {
           </div>
         </div>
       </label>
+
+      <div className="mt-4 pt-3 border-t border-gray-100">
+        <button
+          type="button"
+          onClick={handleConnectionTest}
+          disabled={pingBusy}
+          className="text-[10px] font-bold uppercase tracking-wider text-gray-400 hover:text-gray-600 disabled:opacity-50 underline underline-offset-2"
+        >
+          {pingBusy ? 'Testing connection…' : 'Connection test'}
+        </button>
+        {pingResult && (
+          <p className="text-[11px] font-bold text-gray-500 mt-2 break-words">{pingResult}</p>
+        )}
+      </div>
 
       {busy && (
         <div className="mt-4 flex items-center gap-3 p-3 bg-gray-50 rounded-2xl">
