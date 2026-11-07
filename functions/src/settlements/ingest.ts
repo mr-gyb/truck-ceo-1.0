@@ -62,11 +62,42 @@ const STORAGE_BUCKET = 'truck-ceo.firebasestorage.app';
 
 const db = () => admin.firestore();
 
-/** Firestore rejects undefined values; parsed records carry optional
- *  fields that may be undefined. JSON round-trip drops them safely
- *  (records are plain data — no Dates, no class instances). */
-function clean<T>(obj: T): T {
-  return JSON.parse(JSON.stringify(obj));
+/**
+ * Deep-sanitize a value for Firestore: the Admin SDK REJECTS any
+ * document containing `undefined` ("Cannot use 'undefined' as a
+ * Firestore value") and throws at set()/add()/commit() time. Parser
+ * output is riddled with explicit undefineds — measured 2026-11-07:
+ * 115 undefined paths across the 33 IDP fixtures (Master W43 alone:
+ * record.routeLabelPrinted, registry.routeNumber, registry.discrepancy;
+ * margin-detail item rows carry undefined quantity/amount per row).
+ * Every Firestore write in this module goes through here first.
+ *
+ * Rules: undefined -> null, recursively, including inside arrays and
+ * nested maps (an undefined array element becomes a null element —
+ * Firestore has no "hole" concept). Everything else passes through
+ * unchanged: strings/numbers/booleans/null as-is (NaN and Infinity are
+ * valid Firestore doubles), and class instances (FieldValue sentinels,
+ * Timestamps, Dates) are returned untouched — only PLAIN objects and
+ * arrays are rebuilt. This replaces the old JSON round-trip `clean()`,
+ * which dropped undefined keys silently, would have thrown on BigInt /
+ * circular input, and was only applied to SOME writes.
+ */
+export function sanitizeForFirestore<T>(value: T): T {
+  if (value === undefined) return null as unknown as T;
+  if (Array.isArray(value)) {
+    return value.map((v) => sanitizeForFirestore(v)) as unknown as T;
+  }
+  if (value !== null && typeof value === 'object') {
+    if (value instanceof Date) return value;
+    const proto = Object.getPrototypeOf(value);
+    if (proto !== Object.prototype && proto !== null) return value; // sentinel/class instance
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = sanitizeForFirestore(v);
+    }
+    return out as unknown as T;
+  }
+  return value;
 }
 
 export interface IngestResult {
@@ -123,23 +154,31 @@ async function queueException(
   context: Record<string, unknown>,
 ): Promise<void> {
   const now = admin.firestore.FieldValue.serverTimestamp();
-  await db().collection(`businesses/${businessId}/dataFeedRequests`).add({
-    platform: 'Flowers IDP settlement intake',
-    kind: 'settlement_ingest_exception',
-    status: 'requested',
-    summary,
-    ...context,
-    createdAt: now,
-    via: 'settlement-ingest',
-  });
-  await db().collection('agentInbox').add({
-    type: 'settlement_ingest_exception',
-    summary,
-    businessId,
-    ...context,
-    status: 'open',
-    createdAt: now,
-  });
+  // Sanitized like every other write in this module: a caller-supplied
+  // context value that happens to be undefined must not make the
+  // exception queue itself the thing that throws. The serverTimestamp
+  // sentinel is a class instance and passes the sanitizer untouched.
+  await db().collection(`businesses/${businessId}/dataFeedRequests`).add(
+    sanitizeForFirestore({
+      platform: 'Flowers IDP settlement intake',
+      kind: 'settlement_ingest_exception',
+      status: 'requested',
+      summary,
+      ...context,
+      createdAt: now,
+      via: 'settlement-ingest',
+    }),
+  );
+  await db().collection('agentInbox').add(
+    sanitizeForFirestore({
+      type: 'settlement_ingest_exception',
+      summary,
+      businessId,
+      ...context,
+      status: 'open',
+      createdAt: now,
+    }),
+  );
 }
 
 /**
@@ -165,15 +204,17 @@ async function ingestSettlementBytesInner(
   pdfBytes: Uint8Array,
 ): Promise<IngestResult> {
   let output: FlowersParseOutput;
+  let stage = 'extract';
   try {
     const text = await extractPdfText(pdfBytes);
+    stage = 'parse';
     output = parseFlowersDocument(text, {
       businessId,
       provenance: { kind: 'file', fileName, portal: 'flowers-idp-onbase', storagePath },
       storagePath,
     });
   } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
+    const message = `ingest stage ${stage}: ${e instanceof Error ? e.message : String(e)}`;
     logger.error('ingest: extract/parse failed', { objectName: storagePath, message });
     // Best effort only: if the queue write itself is what is broken in
     // the runtime, it must never mask the original parse error — the
@@ -190,6 +231,11 @@ async function ingestSettlementBytesInner(
     return { ok: false, exception: message };
   }
 
+  // Post-parse stage: every throw from here out is rethrown with its
+  // stage name attached, so the guarded wrapper (and ultimately the
+  // uploader) reports WHERE the ingest died, not just that it died.
+  stage = 'resolve';
+  try {
   const { record, registry } = output;
   const routeNumber = record.routeNumber;
   const weekEnding = record.weekEnding;
@@ -215,7 +261,7 @@ async function ingestSettlementBytesInner(
     }
   }
 
-  const finalRegistry: IngestionRegistryEntry = clean({
+  const finalRegistry: IngestionRegistryEntry = sanitizeForFirestore({
     ...registry,
     routeId: routeDocId ?? undefined,
     recordPath,
@@ -223,9 +269,10 @@ async function ingestSettlementBytesInner(
     discrepancy: problems.join('; ') || undefined,
   });
 
+  stage = 'write';
   const batch = db().batch();
   if (recordPath) {
-    batch.set(db().doc(recordPath), clean(record));
+    batch.set(db().doc(recordPath), sanitizeForFirestore(record));
   }
   batch.set(db().collection(`businesses/${businessId}/ingestionRegistry`).doc(finalRegistry.id), finalRegistry);
   await batch.commit();
@@ -235,21 +282,23 @@ async function ingestSettlementBytesInner(
   // the settlement's store-row source). Standalone marginDetails record
   // above remains the provenance copy either way.
   if (output.docType === 'flowers_margin_detail' && routeDocId) {
+    stage = 'margin-merge';
     const settleRef = db().doc(`businesses/${businessId}/routes/${routeDocId}/settlements/${weekEnding}`);
     const settleSnap = await settleRef.get();
     if (settleSnap.exists) {
       await settleRef.set(
-        {
-          storeRows: clean(output.record.storeRows),
-          itemRows: clean(output.record.itemRows),
+        sanitizeForFirestore({
+          storeRows: output.record.storeRows,
+          itemRows: output.record.itemRows,
           updatedAt: new Date().toISOString(),
-        },
+        }),
         { merge: true },
       );
     }
   }
 
   if (finalRegistry.status === 'needs_review') {
+    stage = 'review-queue';
     await queueException(
       businessId,
       `Settlement ingest needs review: ${output.docType} route ${routeNumber} week ending ${weekEnding} — ${finalRegistry.discrepancy || 'validation discrepancy'}`,
@@ -301,6 +350,13 @@ async function ingestSettlementBytesInner(
           ? undefined
           : `unexpected ingest status: ${finalRegistry.status}`,
   };
+  } catch (e) {
+    // Attach the stage and let the guarded wrapper convert it to a
+    // structured result — the message the uploader prints now names
+    // the stage ('resolve' | 'write' | 'margin-merge' | 'review-queue')
+    // instead of collapsing to a bare framework 'internal'.
+    throw new Error(`ingest stage ${stage}: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 /**
@@ -413,31 +469,49 @@ export const onSettlementUpload = onObjectFinalized({ bucket: STORAGE_BUCKET }, 
  * caller's users/{uid} doc must carry role 'business_owner' and the
  * businessId embedded in the storage path.
  */
-export const reprocessSettlement = onCall(async (request) => {
-  if (!request.auth) throw new HttpsError('unauthenticated', 'Sign-in required.');
-  const storagePath = String(request.data?.storagePath || '');
-  const parsed = parseUploadPath(storagePath);
-  if (!parsed) throw new HttpsError('invalid-argument', 'storagePath must be a settlement upload path.');
-  try {
-    const userSnap = await db().collection('users').doc(request.auth.uid).get();
-    const u = userSnap.exists ? (userSnap.data() as { role?: string; businessId?: string }) : null;
-    if (!u || u.role !== 'business_owner' || u.businessId !== parsed.businessId) {
-      throw new HttpsError('permission-denied', 'Only the business owner can reprocess settlement uploads.');
+export const reprocessSettlement = onCall(
+  // Explicit resources: the gen2 default (256MiB, 60s) starves pdfjs —
+  // a CPU/memory-killed instance surfaces to the client as a bare
+  // functions/internal with no message and no catch block ever running.
+  { memory: '1GiB', timeoutSeconds: 300 },
+  async (request) => {
+    if (!request.auth) throw new HttpsError('unauthenticated', 'Sign-in required.');
+    const storagePath = String(request.data?.storagePath || '');
+    const parsed = parseUploadPath(storagePath);
+    if (!parsed) throw new HttpsError('invalid-argument', 'storagePath must be a settlement upload path.');
+    let stage = 'owner-check';
+    try {
+      // Owner check isolated: a failure of the users-doc read (or junk
+      // in its fields) becomes a clean, stage-named HttpsError here,
+      // never an opaque framework error.
+      let u: { role?: string; businessId?: string } | null = null;
+      try {
+        const userSnap = await db().collection('users').doc(request.auth.uid).get();
+        u = userSnap.exists ? (userSnap.data() as { role?: string; businessId?: string }) : null;
+      } catch (e) {
+        throw new HttpsError(
+          'internal',
+          `ingest stage owner-check: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+      if (!u || u.role !== 'business_owner' || u.businessId !== parsed.businessId) {
+        throw new HttpsError('permission-denied', 'Only the business owner can reprocess settlement uploads.');
+      }
+      stage = 'ingest';
+      const bucket = admin.storage().bucket(STORAGE_BUCKET).name;
+      return await ingestSettlementObject(bucket, storagePath);
+    } catch (e) {
+      // Deliberate HttpsErrors pass through with their message intact.
+      // Anything else would otherwise reach the client as the bare
+      // framework word 'internal' — rethrow WITH the stage and the real
+      // message so the uploader can show what actually failed.
+      if (e instanceof HttpsError) throw e;
+      const message = e instanceof Error ? e.message : String(e);
+      logger.error('reprocessSettlement: unexpected failure', { storagePath, stage, message });
+      throw new HttpsError('internal', `ingest stage ${stage}: ${message}`);
     }
-    const bucket = admin.storage().bucket(STORAGE_BUCKET).name;
-    return await ingestSettlementObject(bucket, storagePath);
-  } catch (e) {
-    // Deliberate HttpsErrors pass through with their message intact.
-    // Anything else (e.g. the Firestore read above failing in the
-    // function runtime) would otherwise reach the client as the bare
-    // framework word 'internal' — rethrow WITH the real message so the
-    // uploader can show what actually failed (diagnosis 2026-11-07).
-    if (e instanceof HttpsError) throw e;
-    const message = e instanceof Error ? e.message : String(e);
-    logger.error('reprocessSettlement: unexpected failure', { storagePath, message });
-    throw new HttpsError('internal', `Settlement processing failed: ${message}`);
-  }
-});
+  },
+);
 
 /**
  * Owner-callable direct ingest (Plan C, 2026-11-07):
@@ -455,68 +529,97 @@ export const reprocessSettlement = onCall(async (request) => {
  * Firestore records written by the shared core are the deliverable and
  * do not depend on that write.
  */
-export const ingestSettlementPdf = onCall(async (request) => {
-  if (!request.auth) throw new HttpsError('unauthenticated', 'Sign-in required.');
-  const filename = String(request.data?.filename || '');
-  const contentBase64 = String(request.data?.contentBase64 || '');
-  try {
-    const userSnap = await db().collection('users').doc(request.auth.uid).get();
-    const u = userSnap.exists ? (userSnap.data() as { role?: string; businessId?: string }) : null;
-    if (!u || u.role !== 'business_owner' || !u.businessId) {
-      throw new HttpsError('permission-denied', 'Only the business owner can upload settlement PDFs.');
-    }
-    const businessId = u.businessId;
-
-    const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
-    if (!safeName || !/\.pdf$/i.test(safeName)) {
-      throw new HttpsError('invalid-argument', 'filename must be a PDF file name.');
-    }
-    if (!contentBase64) {
-      throw new HttpsError('invalid-argument', 'contentBase64 is required.');
-    }
-    // Reject on the encoded length before decoding: base64 inflates by
-    // 4/3, so anything past this cannot decode under the cap.
-    if (contentBase64.length > Math.ceil(MAX_SETTLEMENT_PDF_BYTES / 3) * 4 + 4) {
-      throw new HttpsError(
-        'invalid-argument',
-        `PDF too large — the limit is ${Math.floor(MAX_SETTLEMENT_PDF_BYTES / (1024 * 1024))} MB.`,
-      );
-    }
-    const buffer = Buffer.from(contentBase64.replace(/\s/g, ''), 'base64');
-    if (buffer.length === 0 || buffer.length > MAX_SETTLEMENT_PDF_BYTES) {
-      throw new HttpsError(
-        'invalid-argument',
-        `PDF too large — the limit is ${Math.floor(MAX_SETTLEMENT_PDF_BYTES / (1024 * 1024))} MB.`,
-      );
-    }
-    if (buffer.subarray(0, 5).toString('latin1') !== '%PDF-') {
-      throw new HttpsError('invalid-argument', 'That file is not a PDF.');
-    }
-
-    const storagePath = `businesses/${businessId}/${UPLOAD_PREFIX}/${safeName}`;
-
-    // Best-effort raw-file persistence via the Admin SDK. A failure
-    // here must not block the records — log it and continue.
-    let storedPath: string | undefined;
+export const ingestSettlementPdf = onCall(
+  // Explicit resources: the gen2 default (256MiB, 60s) starves pdfjs —
+  // a CPU/memory-killed instance surfaces to the client as a bare
+  // functions/internal with no message and no catch block ever running
+  // (the live smoke-test signature: generic internal, zero queue rows).
+  { memory: '1GiB', timeoutSeconds: 300 },
+  async (request) => {
+    if (!request.auth) throw new HttpsError('unauthenticated', 'Sign-in required.');
+    const filename = String(request.data?.filename || '');
+    const contentBase64 = String(request.data?.contentBase64 || '');
+    // Stage breadcrumbs: any unexpected throw leaves as
+    // HttpsError('internal', 'ingest stage <name>: <real message>') so
+    // the uploader prints the actual cause instead of bare 'internal'.
+    let stage = 'owner-check';
     try {
-      await admin.storage().bucket(STORAGE_BUCKET).file(storagePath).save(buffer, {
-        contentType: 'application/pdf',
-        resumable: false,
-      });
-      storedPath = storagePath;
-    } catch (se) {
-      logger.warn('ingestSettlementPdf: raw PDF persistence failed (continuing)', {
-        storagePath,
-        message: se instanceof Error ? se.message : String(se),
-      });
-    }
+      // Owner check isolated: a failure of the users-doc read (or junk
+      // in its fields) becomes a clean, stage-named HttpsError here,
+      // never an opaque framework error.
+      let u: { role?: string; businessId?: string } | null = null;
+      try {
+        const userSnap = await db().collection('users').doc(request.auth.uid).get();
+        u = userSnap.exists ? (userSnap.data() as { role?: string; businessId?: string }) : null;
+      } catch (e) {
+        throw new HttpsError(
+          'internal',
+          `ingest stage owner-check: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+      if (!u || u.role !== 'business_owner' || !u.businessId) {
+        throw new HttpsError('permission-denied', 'Only the business owner can upload settlement PDFs.');
+      }
+      const businessId = u.businessId;
 
-    const result = await ingestSettlementBytes(businessId, safeName, storagePath, new Uint8Array(buffer));
-    return storedPath ? { ...result, storedPath } : result;
-  } catch (e) {
-    if (e instanceof HttpsError) throw e;
-    const message = e instanceof Error ? e.message : String(e);
-    logger.error('ingestSettlementPdf: unexpected failure', { filename, message });
-    throw new HttpsError('internal', `Settlement processing failed: ${message}`);
-  }
-});
+      stage = 'decode';
+      const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+      if (!safeName || !/\.pdf$/i.test(safeName)) {
+        throw new HttpsError('invalid-argument', 'filename must be a PDF file name.');
+      }
+      if (!contentBase64) {
+        throw new HttpsError('invalid-argument', 'contentBase64 is required.');
+      }
+      // Reject on the encoded length before decoding: base64 inflates by
+      // 4/3, so anything past this cannot decode under the cap.
+      if (contentBase64.length > Math.ceil(MAX_SETTLEMENT_PDF_BYTES / 3) * 4 + 4) {
+        throw new HttpsError(
+          'invalid-argument',
+          `PDF too large — the limit is ${Math.floor(MAX_SETTLEMENT_PDF_BYTES / (1024 * 1024))} MB.`,
+        );
+      }
+      const buffer = Buffer.from(contentBase64.replace(/\s/g, ''), 'base64');
+      if (buffer.length === 0 || buffer.length > MAX_SETTLEMENT_PDF_BYTES) {
+        throw new HttpsError(
+          'invalid-argument',
+          `PDF too large — the limit is ${Math.floor(MAX_SETTLEMENT_PDF_BYTES / (1024 * 1024))} MB.`,
+        );
+      }
+      if (buffer.subarray(0, 5).toString('latin1') !== '%PDF-') {
+        throw new HttpsError('invalid-argument', 'That file is not a PDF.');
+      }
+
+      const storagePath = `businesses/${businessId}/${UPLOAD_PREFIX}/${safeName}`;
+
+      // Best-effort raw-file persistence via the Admin SDK. EVERY step
+      // — SDK handle, bucket resolution, file ref, save — sits inside
+      // this try, and a failure here must NEVER block or fail the
+      // records: log it and continue to processing regardless.
+      stage = 'store';
+      let storedPath: string | undefined;
+      try {
+        const bucket = admin.storage().bucket(STORAGE_BUCKET);
+        const fileRef = bucket.file(storagePath);
+        await fileRef.save(buffer, {
+          contentType: 'application/pdf',
+          resumable: false,
+        });
+        storedPath = storagePath;
+      } catch (se) {
+        logger.warn('ingestSettlementPdf: raw PDF persistence failed (continuing)', {
+          storagePath,
+          message: se instanceof Error ? se.message : String(se),
+        });
+      }
+
+      stage = 'ingest';
+      const result = await ingestSettlementBytes(businessId, safeName, storagePath, new Uint8Array(buffer));
+      return storedPath ? { ...result, storedPath } : result;
+    } catch (e) {
+      if (e instanceof HttpsError) throw e;
+      const message = e instanceof Error ? e.message : String(e);
+      logger.error('ingestSettlementPdf: unexpected failure', { filename, stage, message });
+      throw new HttpsError('internal', `ingest stage ${stage}: ${message}`);
+    }
+  },
+);
