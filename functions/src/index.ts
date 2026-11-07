@@ -2146,3 +2146,8 @@ export const saveFeedCredentials = onRequest(
 // works for the deploy credential, add onSettlementUpload back to this
 // export line and redeploy.
 export { reprocessSettlement, ingestSettlementPdf } from "./settlements/ingest";
+// Temporary diagnostic (2026-11-07): light callable with NO settlements
+// imports, used by the SettlementUploader "Connection test" button to
+// bisect the ingest callables' bare functions/internal failure. Remove
+// once the ingest pipeline is verified live.
+export { ingestPing } from "./ingestPing";
