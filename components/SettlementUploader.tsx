@@ -75,15 +75,26 @@ export const SettlementUploader: React.FC = () => {
     for (const file of files) {
       if (!/\.pdf$/i.test(file.name)) {
         results.push({ fileName: file.name, state: 'skipped', detail: 'Not a PDF — skipped.' });
+        // Publish before continuing: the setOutcomes at the bottom of
+        // the loop is the only other one, and `continue` skips it —
+        // without this the summary counts the file but no row renders
+        // (audit 2026-11-07: the "counts a failure, lists nothing" bug).
+        setOutcomes([...results]);
         continue;
       }
       const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
       const storagePath = `businesses/${businessId}/settlement-uploads/${safeName}`;
       try {
         await uploadBytes(ref(storage, storagePath), file);
-      } catch (error) {
+      } catch (error: any) {
         console.error('Settlement upload error:', error);
-        results.push({ fileName: file.name, state: 'failed', detail: 'Upload failed — check your connection and try again.' });
+        const code = error?.code ? `${error.code}: ` : '';
+        results.push({
+          fileName: file.name,
+          state: 'failed',
+          detail: `Upload failed: ${code}${error?.message || 'check your connection and try again.'}`,
+        });
+        setOutcomes([...results]);
         continue;
       }
       try {
