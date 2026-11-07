@@ -44,9 +44,58 @@ import { onObjectFinalized, StorageEvent } from 'firebase-functions/v2/storage';
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import * as logger from 'firebase-functions/logger';
 import * as admin from 'firebase-admin';
-import { extractPdfText } from './pdfText';
-import { FlowersParseOutput, parseFlowersDocument } from './index';
-import { IngestionRegistryEntry } from './types';
+import type { FlowersParseOutput } from './index';
+import type { IngestionRegistryEntry } from './types';
+
+/**
+ * Lazy parser stack (bisect build, 2026-11-07): the deployed
+ * ingestSettlementPdf failed the live smoke test with a BARE
+ * functions/internal — no stage name — even though every handler path
+ * converts throws into stage-named HttpsErrors. That signature means
+ * the failure happens BEFORE the handler runs: module load or
+ * instance startup. The heavy end of this module's import graph is
+ * the parser stack (./pdfText pulls pdfjs-dist; ./index pulls
+ * ./flowersIdp), so those imports are no longer static: they load via
+ * dynamic import() inside the ingest path as their own stage
+ * ('load'), and a load failure surfaces as HttpsError('internal',
+ * 'ingest stage load: <real message>') from the callables instead of
+ * a dead instance. firebase-functions + firebase-admin stay static —
+ * the other live functions prove those load.
+ *
+ * Module-scope audit at the same time: types.ts / settlements
+ * index.ts carry declarations only; flowersIdp.ts adds only literal
+ * constants (a regex and two label arrays); pdfText.ts adds only
+ * numeric constants — the pdfjs import itself was the only executable
+ * load-time risk there. This module's own scope is literal constants,
+ * the db() arrow, and the firebase-functions builder definitions
+ * (onCall / onObjectFinalized), which are declaration-class.
+ */
+interface ParserStack {
+  pdfText: typeof import('./pdfText');
+  index: typeof import('./index');
+}
+
+let parserStackPromise: Promise<ParserStack> | null = null;
+
+function loadParserStack(): Promise<ParserStack> {
+  if (!parserStackPromise) {
+    parserStackPromise = (async () => {
+      const [pdfText, index] = await Promise.all([import('./pdfText'), import('./index')]);
+      return { pdfText, index };
+    })();
+    // A rejected load must not poison the instance for its lifetime:
+    // clear the cache so a later call retries the import.
+    parserStackPromise.catch(() => {
+      parserStackPromise = null;
+    });
+  }
+  return parserStackPromise;
+}
+
+/** Marker prefix for load-stage failures. The guarded bytes wrapper
+ *  passes these through verbatim, and the callables convert a result
+ *  carrying one into a thrown HttpsError with the same message. */
+const LOAD_STAGE_PREFIX = 'ingest stage load:';
 
 const UPLOAD_PREFIX = 'settlement-uploads';
 
@@ -204,16 +253,26 @@ async function ingestSettlementBytesInner(
   pdfBytes: Uint8Array,
 ): Promise<IngestResult> {
   let output: FlowersParseOutput;
-  let stage = 'extract';
+  let stage = 'load';
   try {
-    const text = await extractPdfText(pdfBytes);
+    const stack = await loadParserStack();
+    stage = 'extract';
+    const text = await stack.pdfText.extractPdfText(pdfBytes);
     stage = 'parse';
-    output = parseFlowersDocument(text, {
+    output = stack.index.parseFlowersDocument(text, {
       businessId,
       provenance: { kind: 'file', fileName, portal: 'flowers-idp-onbase', storagePath },
       storagePath,
     });
   } catch (e) {
+    if (stage === 'load') {
+      // Module-load failures are a distinct failure class (the bisect
+      // target): rethrow with the stage marker instead of returning a
+      // result, so the callables convert them to a thrown
+      // HttpsError('internal', 'ingest stage load: ...'). The guarded
+      // wrappers pass the marked message through verbatim.
+      throw new Error(`${LOAD_STAGE_PREFIX} ${e instanceof Error ? e.message : String(e)}`);
+    }
     const message = `ingest stage ${stage}: ${e instanceof Error ? e.message : String(e)}`;
     logger.error('ingest: extract/parse failed', { objectName: storagePath, message });
     // Best effort only: if the queue write itself is what is broken in
@@ -420,7 +479,15 @@ export async function ingestSettlementBytes(
     } catch (qe) {
       logger.error('ingest: exception queue write failed (post-parse path)', { objectName: storagePath, qe });
     }
-    return { ok: false, exception: `ingest failed after parse: ${message}` };
+    return {
+      ok: false,
+      // Load-stage failures keep their exact marker text (the
+      // callables key on it); everything else keeps the wrapper's
+      // post-parse framing.
+      exception: message.startsWith(LOAD_STAGE_PREFIX)
+        ? message
+        : `ingest failed after parse: ${message}`,
+    };
   }
 }
 
@@ -473,7 +540,8 @@ export const reprocessSettlement = onCall(
   // Explicit resources: the gen2 default (256MiB, 60s) starves pdfjs —
   // a CPU/memory-killed instance surfaces to the client as a bare
   // functions/internal with no message and no catch block ever running.
-  { memory: '1GiB', timeoutSeconds: 300 },
+  // Raised to 2GiB in the bisect build (2026-11-07).
+  { memory: '2GiB', timeoutSeconds: 300 },
   async (request) => {
     if (!request.auth) throw new HttpsError('unauthenticated', 'Sign-in required.');
     const storagePath = String(request.data?.storagePath || '');
@@ -499,7 +567,14 @@ export const reprocessSettlement = onCall(
       }
       stage = 'ingest';
       const bucket = admin.storage().bucket(STORAGE_BUCKET).name;
-      return await ingestSettlementObject(bucket, storagePath);
+      const result = await ingestSettlementObject(bucket, storagePath);
+      // Load-stage failures become a THROWN HttpsError carrying the
+      // real load error, per the bisect design — not a returned
+      // result the client renders as a processing failure.
+      if (!result.ok && result.exception?.startsWith(LOAD_STAGE_PREFIX)) {
+        throw new HttpsError('internal', result.exception);
+      }
+      return result;
     } catch (e) {
       // Deliberate HttpsErrors pass through with their message intact.
       // Anything else would otherwise reach the client as the bare
@@ -534,7 +609,8 @@ export const ingestSettlementPdf = onCall(
   // a CPU/memory-killed instance surfaces to the client as a bare
   // functions/internal with no message and no catch block ever running
   // (the live smoke-test signature: generic internal, zero queue rows).
-  { memory: '1GiB', timeoutSeconds: 300 },
+  // Raised to 2GiB in the bisect build (2026-11-07).
+  { memory: '2GiB', timeoutSeconds: 300 },
   async (request) => {
     if (!request.auth) throw new HttpsError('unauthenticated', 'Sign-in required.');
     const filename = String(request.data?.filename || '');
@@ -614,6 +690,12 @@ export const ingestSettlementPdf = onCall(
 
       stage = 'ingest';
       const result = await ingestSettlementBytes(businessId, safeName, storagePath, new Uint8Array(buffer));
+      // Load-stage failures become a THROWN HttpsError carrying the
+      // real load error, per the bisect design — not a returned
+      // result the client renders as a processing failure.
+      if (!result.ok && result.exception?.startsWith(LOAD_STAGE_PREFIX)) {
+        throw new HttpsError('internal', result.exception);
+      }
       return storedPath ? { ...result, storedPath } : result;
     } catch (e) {
       if (e instanceof HttpsError) throw e;
