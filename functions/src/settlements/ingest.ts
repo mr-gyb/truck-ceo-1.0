@@ -36,6 +36,12 @@ import { IngestionRegistryEntry } from './types';
 
 const UPLOAD_PREFIX = 'settlement-uploads';
 
+/** The project's default storage bucket, named explicitly: firebase-tools
+ *  cannot resolve the default bucket's region at deploy time for the
+ *  storage trigger below ("Can't find the storage bucket region"), so the
+ *  bucket must be pinned here rather than inferred. */
+const STORAGE_BUCKET = 'truck-ceo.firebasestorage.app';
+
 const db = () => admin.firestore();
 
 /** Firestore rejects undefined values; parsed records carry optional
@@ -237,7 +243,7 @@ export async function ingestSettlementObject(
  * Storage trigger: fires on every finalized object in the default bucket;
  * only businesses/{bid}/settlement-uploads/*.pdf objects are processed.
  */
-export const onSettlementUpload = onObjectFinalized(async (event: StorageEvent) => {
+export const onSettlementUpload = onObjectFinalized({ bucket: STORAGE_BUCKET }, async (event: StorageEvent) => {
   const name = event.data.name || '';
   if (!parseUploadPath(name)) return;
   if (!/\.pdf$/i.test(name)) {
@@ -268,6 +274,6 @@ export const reprocessSettlement = onCall(async (request) => {
   if (!u || u.role !== 'business_owner' || u.businessId !== parsed.businessId) {
     throw new HttpsError('permission-denied', 'Only the business owner can reprocess settlement uploads.');
   }
-  const bucket = admin.storage().bucket().name;
+  const bucket = admin.storage().bucket(STORAGE_BUCKET).name;
   return ingestSettlementObject(bucket, storagePath);
 });
