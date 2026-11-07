@@ -75,11 +75,13 @@ export const SettlementUploader: React.FC = () => {
   const [messageType, setMessageType] = useState<'success' | 'warning' | 'error'>('success');
   const [outcomes, setOutcomes] = useState<FileOutcome[]>([]);
   // Temporary diagnostics (2026-11-07): the "Connection test" button
-  // calls the light ingestPing callable (no settlements imports) and
-  // renders its result verbatim, bisecting the ingest callable's bare
-  // functions/internal failure: ping OK + ingest bare-internal points
-  // inside the settlements module; ping ALSO failing points at the
-  // platform. Remove once the pipeline is verified live.
+  // calls diagPing from the ISOLATED diag codebase (functions2/ — no
+  // settlements imports, no providers, no shared module scope with the
+  // main functions codebase) and renders its result verbatim. Every
+  // main-codebase callable, even featherweight ones sharing only
+  // functions/src/index.ts, fails with a bare functions/internal:
+  // diag OK points at that shared module scope; diag ALSO failing
+  // points at the platform. Remove once the pipeline is verified live.
   const [pingBusy, setPingBusy] = useState(false);
   const [pingResult, setPingResult] = useState('');
 
@@ -87,12 +89,12 @@ export const SettlementUploader: React.FC = () => {
     setPingBusy(true);
     setPingResult('');
     try {
-      const ping = httpsCallable<Record<string, unknown>, { ok: boolean; ts: string }>(
+      const ping = httpsCallable<Record<string, unknown>, { ok: boolean; ts: string; codebase?: string }>(
         getFunctions(),
-        'ingestPing'
+        'diagPing'
       );
       const { data } = await ping({});
-      setPingResult(`Connection test OK — ingestPing returned ok=${data.ok} at ${data.ts}`);
+      setPingResult(`Connection test OK — diag backend answered: diagPing returned ok=${data.ok} (codebase=${data.codebase ?? 'diag'}) at ${data.ts}`);
     } catch (error: any) {
       console.error('Connection test error:', error);
       // Exact code + message, verbatim under the button — the code is
