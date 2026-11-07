@@ -36,6 +36,10 @@ jobs:
       # the deploy aborts before touching production.
       - run: npm ci --prefix functions
 
+      # Diag codebase deps (added 2026-11-07 for the functions2 bisect):
+      # its predeploy tsc build needs functions2/node_modules present.
+      - run: npm ci --prefix functions2
+
       - id: gcp-auth
         uses: google-github-actions/auth@v2
         with:
