@@ -12,6 +12,7 @@ import { db } from '../services/firebaseConfig';
 import { useAuth } from '../contexts/AuthContext';
 import { SecureConnectModal } from './SecureConnectModal';
 import { CSVUploader } from './CSVUploader';
+import { SettlementUploader } from './SettlementUploader';
 import { View, InviteCode } from '../types';
 
 interface DataHubProps {
@@ -523,6 +524,7 @@ export const DataHub: React.FC<DataHubProps> = ({ onNavigate }) => {
               description="Upload store locations from CSV"
               icon="fa-store"
             />
+            <SettlementUploader />
           </div>
         </section>
       )}
