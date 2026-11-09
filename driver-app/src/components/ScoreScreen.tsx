@@ -24,14 +24,16 @@ export const ScoreScreen: React.FC = () => {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      if (!profile || !route) {
-        setLoading(false);
-        return;
-      }
-      const latest = await getLatestDriverScore(profile.businessId, route.id);
-      if (!cancelled) {
-        setScore(latest);
-        setLoading(false);
+      // The loading state MUST clear on every path — a rejected read used
+      // to leave this tab on the skeleton forever (2026-11-08 defect).
+      try {
+        if (!profile || !route) return;
+        const latest = await getLatestDriverScore(profile.businessId, route.id);
+        if (!cancelled) setScore(latest);
+      } catch {
+        if (!cancelled) setScore(null);
+      } finally {
+        if (!cancelled) setLoading(false);
       }
     })();
     return () => {
@@ -47,9 +49,9 @@ export const ScoreScreen: React.FC = () => {
         <i className="fa-solid fa-star text-3xl text-slate-300" />
         <h2 className="mt-3 text-lg font-black uppercase tracking-tight">No score yet</h2>
         <p className="mt-2 text-sm text-slate-600">
-          Driver Scores post weekly out of 100 — Sales 30, Stale control 25, Planogram 15, Fuel
-          15, Data discipline 15. Finish your days and submit your end-of-day reports, and your
-          first score will land here.
+          No score yet — your first score posts after your first full week. Driver Scores post
+          weekly out of 100 — Sales 30, Stale control 25, Planogram 15, Fuel 15, Data discipline
+          15. Finish your days and submit your end-of-day reports, and it will land here.
         </p>
       </div>
     );
