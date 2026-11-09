@@ -67,9 +67,23 @@ service cloud.firestore {
       }
 
       // Invite links: business members can read; only owners create/revoke.
+      // Members may bump ONLY usedCount (a driver join increments it) and
+      // may create their own redemption record — both were impossible under
+      // the owner-only write, which is why joins never registered here.
+      // NOTE (2026-11-08): the owner UI reads counts from the global
+      // inviteCodes doc, which any signed-in user may update, so joins
+      // register even before this rules update is published.
       match /invites/{code} {
         allow read: if isMyBusiness(bid);
-        allow write: if isMyBusiness(bid) && myProfile().role == 'business_owner';
+        allow create, delete: if isMyBusiness(bid) && myProfile().role == 'business_owner';
+        allow update: if isMyBusiness(bid)
+          && (myProfile().role == 'business_owner'
+              || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['usedCount']));
+        match /redemptions/{uid} {
+          allow read: if isMyBusiness(bid);
+          allow create: if isMyBusiness(bid) && request.auth.uid == uid;
+          allow update, delete: if false;
+        }
       }
 
       // Data-source connection status: written only by the backend function
@@ -100,6 +114,14 @@ service cloud.firestore {
         }
         match /updates/{updid} {
           allow read, write: if isMyBusiness(bid);
+        }
+        // Weekly Driver Scores (driver app "My Score" tab). This match was
+        // MISSING — the read was denied outright, and the tab hung on its
+        // loading skeleton (2026-11-08 defect). Members read; scores are
+        // written by the backend (Admin SDK) or owners.
+        match /driverScores/{sid} {
+          allow read: if isMyBusiness(bid);
+          allow write: if isMyBusiness(bid) && myProfile().role == 'business_owner';
         }
 
         // ---- Data intake (added 2026-11-06; see docs/data-intake-design.md
