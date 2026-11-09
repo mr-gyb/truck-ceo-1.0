@@ -1,10 +1,12 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import {
   createUserWithEmailAndPassword,
+  getRedirectResult,
   GoogleAuthProvider,
   onAuthStateChanged,
   signInWithEmailAndPassword,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
   type User,
 } from 'firebase/auth';
@@ -49,6 +51,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setLoading(false);
       return;
     }
+    // Complete the redirect fallback path if we just returned from one
+    // (see signInWithGoogle). The signed-in user surfaces through
+    // onAuthStateChanged below; this call only consumes the pending
+    // redirect result. Errors are swallowed on purpose — a failed
+    // redirect completion must not take the app down.
+    getRedirectResult(authI).catch(() => undefined);
     const unsub = onAuthStateChanged(authI, async (user) => {
       setCurrentUser(user);
       if (user) {
@@ -80,9 +88,31 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     await createUserWithEmailAndPassword(auth, email, password);
   };
 
+  // Popup-first: popups keep the whole flow on this page, which is what
+  // works in storage-partitioned webviews (iOS in-app browsers), where a
+  // full-page redirect to the auth handler loses its sessionStorage state
+  // and fails with "missing initial state". Only when the popup itself
+  // cannot run do we fall back to signInWithRedirect (completed on the
+  // next load by the getRedirectResult call in the effect above). The
+  // same-domain authDomain in firebaseConfig keeps that fallback same-site
+  // on the production hosting domains.
   const signInWithGoogle = async () => {
     if (!auth) throw new Error('App is not connected to Firebase yet.');
-    await signInWithPopup(auth, new GoogleAuthProvider());
+    const provider = new GoogleAuthProvider();
+    try {
+      await signInWithPopup(auth, provider);
+    } catch (err) {
+      const code = (err as { code?: string } | null)?.code;
+      if (
+        code === 'auth/popup-blocked' ||
+        code === 'auth/operation-not-supported-in-this-environment' ||
+        code === 'auth/cancelled-popup-request'
+      ) {
+        await signInWithRedirect(auth, provider);
+        return;
+      }
+      throw err;
+    }
   };
 
   /**
