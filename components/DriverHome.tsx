@@ -59,7 +59,7 @@ export interface DriverPreview {
   onExit: () => void;
 }
 
-export const DriverHome: React.FC<{ preview?: DriverPreview }> = ({ preview }) => {
+export const DriverHome: React.FC<{ preview?: DriverPreview; driverSession?: DriverPreview }> = ({ preview, driverSession }) => {
   const { userProfile, logout } = useAuth();
   const { toasts, showToast, removeToast } = useToast();
   const [tab, setTab] = useState<Tab>('feed');
@@ -68,10 +68,14 @@ export const DriverHome: React.FC<{ preview?: DriverPreview }> = ({ preview }) =
 
   // Preview mode (owner "view as driver") overrides the profile-derived values.
   // When preview is absent these are byte-for-byte identical to the old behavior.
+  // driverSession is the dual-role case (2026-11-08): a signed-in owner who
+  // also holds a driver membership uses the REAL driver interface — writes
+  // live — and exits back to the owner dashboard instead of signing out.
   const isPreview = preview !== undefined;
-  const businessId = preview ? preview.businessId : userProfile?.businessId;
-  const routeId = preview ? preview.routeId : userProfile?.routeIds?.[0];
-  const driverName = preview ? preview.driverName : (userProfile?.displayName || 'Driver');
+  const session = preview ?? driverSession;
+  const businessId = session ? session.businessId : userProfile?.businessId;
+  const routeId = session ? session.routeId : userProfile?.routeIds?.[0];
+  const driverName = session ? session.driverName : (userProfile?.displayName || 'Driver');
 
   useEffect(() => {
     if (!businessId || !routeId) {
@@ -130,11 +134,11 @@ export const DriverHome: React.FC<{ preview?: DriverPreview }> = ({ preview }) =
             </div>
           </div>
           <button
-            onClick={preview ? preview.onExit : logout}
+            onClick={session ? session.onExit : logout}
             className="w-10 h-10 bg-white/10 rounded-xl flex items-center justify-center text-gray-300 active:scale-95"
-            aria-label={isPreview ? 'Exit preview' : 'Sign out'}
+            aria-label={isPreview ? 'Exit preview' : driverSession ? 'Back to owner view' : 'Sign out'}
           >
-            <i className={`fas ${isPreview ? 'fa-times' : 'fa-sign-out-alt'}`}></i>
+            <i className={`fas ${isPreview ? 'fa-times' : driverSession ? 'fa-th-large' : 'fa-sign-out-alt'}`}></i>
           </button>
         </div>
       </header>
@@ -146,6 +150,19 @@ export const DriverHome: React.FC<{ preview?: DriverPreview }> = ({ preview }) =
             <i className="fas fa-eye text-xs"></i>
             <span className="text-[10px] font-black uppercase tracking-[0.2em]">
               Driver preview · {routeLoading ? '…' : route?.name || 'Route'} · writes disabled
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Dual-role banner — signed-in owner using their own driver view;
+          writes are live, owner dashboard is one tap away (header button). */}
+      {driverSession && (
+        <div className="bg-[#FFD700] text-black px-5 py-2.5">
+          <div className="max-w-md mx-auto flex items-center justify-center gap-2">
+            <i className="fas fa-id-card text-xs"></i>
+            <span className="text-[10px] font-black uppercase tracking-[0.2em]">
+              Driver view · {routeLoading ? '…' : route?.name || 'Route'} · tap the grid icon for owner view
             </span>
           </div>
         </div>
