@@ -8,16 +8,20 @@ import {
   GoogleAuthProvider,
   signInWithPopup
 } from 'firebase/auth';
-import { doc, getDoc, setDoc, collection, updateDoc, increment } from 'firebase/firestore';
+import { doc, getDoc, setDoc, collection, updateDoc, increment, arrayUnion } from 'firebase/firestore';
 import { auth, db } from '../services/firebaseConfig';
+import type { DriverMembership } from '../types';
 
 interface UserProfile {
   email: string;
   displayName: string;
-  role: 'business_owner' | 'team_member';
+  role: 'business_owner' | 'business_manager' | 'team_member';
   businessId: string;
   employeeId?: string;
   routeIds?: string[];
+  // Driver bindings held WITHOUT changing the primary role (dual-role
+  // accounts: an owner who also drives a route). See completeDriverJoin.
+  driverMemberships?: DriverMembership[];
   // Welcome onboarding state (set by the onboarding wizard).
   onboardingCompleted?: boolean;
   onboardingSkippedAt?: unknown;
@@ -118,6 +122,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   // Driver path: redeem an invite code -> link driver to business + route + owner.
+  //
+  // Join semantics (2026-11-08 fix pass — owner and driver apps share them):
+  //  1. The users/{uid} profile is written FIRST (the rules evaluate
+  //     membership from it), with merge so an existing profile is never
+  //     clobbered: an owner/manager who drives a route keeps their role and
+  //     businessId and the binding lands in driverMemberships instead.
+  //  2. The employee record is created under the owner's business so the
+  //     joiner shows up in the team list (and in Driver Invites).
+  //  3. usedCount + a redemption record land on the GLOBAL inviteCodes doc
+  //     (any signed-in user may update it — this is the count the owner UI
+  //     reads). The business-level copy is updated best-effort: rules only
+  //     let owners write it, so a driver join skips it silently.
   const completeDriverJoin = async (inviteCode: string) => {
     const user = auth.currentUser;
     if (!user) throw new Error('Not signed in');
@@ -143,8 +159,38 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const routeIds = invite.routeId ? [invite.routeId] : [];
     const displayName = pendingName || user.displayName || user.email || (accountRole === 'business_manager' ? 'Partner' : 'Driver');
 
-    // Create the employee record under the owner's business so the joiner
-    // shows up in the team list.
+    // (1) Profile first, merged. Owners/managers keep their role: the
+    // driver binding is appended to driverMemberships (deduped by route).
+    const existingSnap = await getDoc(doc(db, 'users', user.uid));
+    const existing = (existingSnap.exists() ? (existingSnap.data() as UserProfile) : null);
+    const isOwnerRole = existing?.role === 'business_owner' || existing?.role === 'business_manager';
+    const membership: DriverMembership = {
+      businessId: invite.businessId,
+      routeId: invite.routeId,
+      routeName: invite.routeName,
+      joinedAt: new Date()
+    };
+    const priorMemberships = (existing?.driverMemberships || []).filter(
+      (m) => !(m.businessId === invite.businessId && m.routeId === invite.routeId)
+    );
+    if (isOwnerRole) {
+      await setDoc(doc(db, 'users', user.uid), {
+        driverMemberships: [...priorMemberships, membership]
+      }, { merge: true });
+    } else {
+      await setDoc(doc(db, 'users', user.uid), {
+        email: user.email,
+        displayName,
+        role: accountRole,
+        businessId: invite.businessId,
+        routeIds,
+        driverMemberships: [...priorMemberships, membership],
+        createdAt: new Date()
+      });
+    }
+
+    // (2) Employee record under the owner's business so the joiner shows
+    // up in the team list and in Driver Invites.
     const empRef = doc(collection(db, `businesses/${invite.businessId}/employees`));
     await setDoc(empRef, {
       name: displayName,
@@ -162,24 +208,41 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       inviteCode: code,
       createdAt: new Date()
     });
+    if (isOwnerRole) {
+      membership.employeeId = empRef.id;
+      await setDoc(doc(db, 'users', user.uid), {
+        driverMemberships: [...priorMemberships, membership]
+      }, { merge: true });
+    } else {
+      await updateDoc(doc(db, 'users', user.uid), { employeeId: empRef.id });
+    }
 
-    // Link the auth user to the business (and route, when the invite is route-scoped).
-    await setDoc(doc(db, 'users', user.uid), {
-      email: user.email,
-      displayName,
-      role: accountRole,
-      businessId: invite.businessId,
-      employeeId: empRef.id,
-      routeIds,
-      createdAt: new Date()
+    // (3) Count + redemption on the global invite doc (owner UI reads here).
+    await updateDoc(doc(db, 'inviteCodes', code), {
+      usedCount: increment(1),
+      redemptions: arrayUnion({
+        uid: user.uid,
+        email: user.email || null,
+        displayName,
+        routeId: invite.routeId,
+        joinedAt: new Date()
+      })
     });
-
-    await updateDoc(doc(db, 'inviteCodes', code), { usedCount: increment(1) });
-    // Dual-written business-level links also track usage under the business.
+    // Business-level copy: owner-writable only per rules — best effort.
     try {
-      await updateDoc(doc(db, `businesses/${invite.businessId}/invites`, code), { usedCount: increment(1) });
+      await updateDoc(doc(db, `businesses/${invite.businessId}/invites`, code), {
+        usedCount: increment(1),
+        redemptions: arrayUnion({
+          uid: user.uid,
+          email: user.email || null,
+          displayName,
+          routeId: invite.routeId,
+          joinedAt: new Date()
+        })
+      });
     } catch {
-      // Legacy per-route codes have no business-level copy — not an error.
+      // A driver join cannot write the business-level copy under current
+      // rules — the global doc above is the source of truth, so not an error.
     }
 
     // Clean an invite deep link (/join/{code}) back to the app root.
