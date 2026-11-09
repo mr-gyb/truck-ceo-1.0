@@ -152,10 +152,25 @@ export const SCORE_WEIGHTS = {
   dataDiscipline: 15,
 } as const;
 
+/**
+ * A driver binding on a users doc whose primary role may be something else
+ * (business_owner / business_manager). Mirrors the owner app's
+ * DriverMembership: redeeming an invite never overwrites an owner profile;
+ * the binding lands here and this app resolves its driver profile from it.
+ */
+export interface DriverMembership {
+  businessId: string;
+  routeId: string;
+  routeName?: string;
+  employeeId?: string;
+  joinedAt?: unknown;
+}
+
 export interface DriverProfile {
   email: string;
   displayName: string;
   role: 'team_member';
   businessId: string;
   routeIds: string[];
+  driverMemberships?: DriverMembership[];
 }
