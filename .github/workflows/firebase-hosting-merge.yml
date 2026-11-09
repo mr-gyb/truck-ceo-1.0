@@ -29,6 +29,21 @@ jobs:
           VITE_FIREBASE_MESSAGING_SENDER_ID: "419699908912"
           VITE_FIREBASE_APP_ID: 1:419699908912:web:24d85875480487de03e8f5
 
+      # Driver app (added 2026-11-08): a separate Vite app in driver-app/,
+      # shipped on this same hosting site at /driver/ (firebase.json routes
+      # /driver/** to its index). It uses the same VITE_FIREBASE_* web config
+      # as the owner app (same Firebase project), builds after the owner app,
+      # and its dist is copied into dist/driver so one hosting deploy ships both.
+      - run: npm ci --prefix driver-app && npm run build --prefix driver-app
+        env:
+          VITE_FIREBASE_API_KEY: AIzaSyAf60UgNSyncGk-6j55UXjZ1U54IxJpIQU
+          VITE_FIREBASE_AUTH_DOMAIN: truck-ceo.firebaseapp.com
+          VITE_FIREBASE_PROJECT_ID: truck-ceo
+          VITE_FIREBASE_STORAGE_BUCKET: truck-ceo.firebasestorage.app
+          VITE_FIREBASE_MESSAGING_SENDER_ID: "419699908912"
+          VITE_FIREBASE_APP_ID: 1:419699908912:web:24d85875480487de03e8f5
+      - run: mkdir -p dist/driver && cp -r driver-app/dist/. dist/driver/
+
       # Functions deps must be installed in CI: the firebase.json predeploy hook
       # runs `npm --prefix functions run build` (tsc), which needs
       # functions/node_modules present. Without this step every type from
