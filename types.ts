@@ -125,9 +125,18 @@ export interface RouteTerritory {
   vendorId?: string;
 }
 
-export type View = 'dashboard' | 'ordering' | 'team' | 'fleet' | 'fleet_assign' | 'promos' | 'data_hub' | 'weather' | 'navigation' | 'settings' | 'routes_management';
+export type View = 'dashboard' | 'ordering' | 'team' | 'fleet' | 'fleet_assign' | 'promos' | 'data_hub' | 'weather' | 'navigation' | 'settings' | 'routes_management' | 'driver_invites';
 
 // ===== Driver app (role-based) =====
+
+/** One recorded redemption of an invite code (written on join). */
+export interface InviteRedemption {
+  uid: string;
+  email: string | null;
+  displayName?: string;
+  routeId?: string;
+  joinedAt: any;
+}
 
 export interface InviteCode {
   code: string;
@@ -139,6 +148,21 @@ export interface InviteCode {
   usedCount: number;
   kind?: string; // 'link' for business-level invite links vs per-route codes
   role?: string; // 'team_member' (driver view) | 'business_manager' (business view)
+  redemptions?: InviteRedemption[];
+}
+
+/**
+ * A driver binding held by an account whose primary role is something else
+ * (business_owner / business_manager). Redeeming a driver invite must never
+ * overwrite an owner profile — the binding lands here instead, and the app
+ * offers a Driver view switch for accounts that hold one.
+ */
+export interface DriverMembership {
+  businessId: string;
+  routeId: string;
+  routeName?: string;
+  employeeId?: string;
+  joinedAt?: any;
 }
 
 export interface DriverEod {
