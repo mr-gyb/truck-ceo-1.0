@@ -45,6 +45,10 @@
         }
       },
       {
+        "source": "/driver/**",
+        "destination": "/driver/index.html"
+      },
+      {
         "source": "**",
         "destination": "/index.html"
       }
@@ -88,6 +92,15 @@
       },
       {
         "source": "/join/**",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache, no-store, must-revalidate"
+          }
+        ]
+      },
+      {
+        "source": "/driver/**",
         "headers": [
           {
             "key": "Cache-Control",
