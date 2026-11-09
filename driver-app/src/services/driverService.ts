@@ -78,18 +78,28 @@ export async function submitEodReport(
 /**
  * Latest weekly Driver Score. The weekly computation does not exist yet, so
  * this returns null in practice and the Score screen shows its empty state.
+ *
+ * NEVER throws (2026-11-08 fix): the driverScores subcollection had no
+ * Firestore rules match, so this read is permission-denied — and the old
+ * version let the rejection escape, leaving the Score tab on its loading
+ * skeleton forever. Any failure reads as "no score yet".
  */
 export async function getLatestDriverScore(
   businessId: string,
   routeId: string,
 ): Promise<DriverScore | null> {
   if (!db) return null;
-  const snap = await getDocs(
-    collection(db, 'businesses', businessId, 'routes', routeId, 'driverScores'),
-  );
-  if (snap.empty) return null;
-  const docs = snap.docs
-    .map((d) => d.data() as DriverScore)
-    .sort((a, b) => b.weekOf.localeCompare(a.weekOf));
-  return docs[0] ?? null;
+  try {
+    const snap = await getDocs(
+      collection(db, 'businesses', businessId, 'routes', routeId, 'driverScores'),
+    );
+    if (snap.empty) return null;
+    const docs = snap.docs
+      .map((d) => d.data() as DriverScore)
+      .sort((a, b) => b.weekOf.localeCompare(a.weekOf));
+    return docs[0] ?? null;
+  } catch (err) {
+    console.warn('Driver score read failed; showing empty state.', err);
+    return null;
+  }
 }
