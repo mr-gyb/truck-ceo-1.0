@@ -20,6 +20,7 @@ import { TruckCeoAgent } from './components/TruckCeoAgent';
 import { TruckNavigation } from './components/TruckNavigation';
 import { UserSettings } from './components/UserSettings';
 import { RoutesManagement } from './components/RoutesManagement';
+import { DriverInvites } from './components/DriverInvites';
 import { OnboardingWizard } from './components/OnboardingWizard';
 import { SetupCompleteModal } from './components/SetupCompleteModal';
 import { SaleAlertFormModal } from './components/forms/SaleAlertFormModal';
@@ -39,6 +40,9 @@ const AppContent: React.FC = () => {
   const [navTruckId, setNavTruckId] = useState<string | null>(null);
   const [previewRoute, setPreviewRoute] = useState<RouteTerritory | null>(null);
   const [previewPickerOpen, setPreviewPickerOpen] = useState(false);
+  // Dual-role accounts (owner who also drives): the real driver interface,
+  // entered via the "Driver view" switch, exited back to this dashboard.
+  const [driverSessionOpen, setDriverSessionOpen] = useState(false);
 
   // Welcome onboarding state (owner only).
   const [wizardOpen, setWizardOpen] = useState(false);
@@ -120,6 +124,33 @@ const AppContent: React.FC = () => {
     return <LoadingScreen message="Loading your data..." />;
   }
 
+  // Dual-role driver session: an owner/manager who also holds a driver
+  // binding (driverMemberships, or legacy routeIds on their profile) gets
+  // the real driver interface with live writes and an exit back here.
+  // Owner-capable accounts ALWAYS land on this owner dashboard first —
+  // the driver view is a switch, never a trap (2026-11-08 defect fix).
+  const driverBinding =
+    userProfile.role === 'business_owner' || userProfile.role === 'business_manager'
+      ? (userProfile.driverMemberships && userProfile.driverMemberships.length > 0
+          ? { businessId: userProfile.driverMemberships[0].businessId, routeId: userProfile.driverMemberships[0].routeId }
+          : userProfile.routeIds && userProfile.routeIds.length > 0
+            ? { businessId: userProfile.businessId, routeId: userProfile.routeIds[0] }
+            : null)
+      : null;
+
+  if (driverSessionOpen && driverBinding) {
+    return (
+      <DriverHome
+        driverSession={{
+          businessId: driverBinding.businessId,
+          routeId: driverBinding.routeId,
+          driverName: userProfile.displayName || 'Driver',
+          onExit: () => setDriverSessionOpen(false)
+        }}
+      />
+    );
+  }
+
   // Owner "preview as driver": fullscreen driver view for the chosen route.
   // Writes are disabled inside DriverHome via the preview prop.
   if (previewRoute) {
@@ -195,6 +226,8 @@ const AppContent: React.FC = () => {
         return <UserSettings />;
       case 'routes_management':
         return <RoutesManagement />;
+      case 'driver_invites':
+        return <DriverInvites />;
       default:
         return <MainDashboard onWeatherClick={() => setActiveView('weather')} currentRoute={currentRoute} currentStore={currentStore} onRouteChange={setCurrentRoute} onStoreChange={setCurrentStore} fleetCount={trucks.length} onPreviewAsDriver={() => setPreviewPickerOpen(true)} onFleetAssign={() => setActiveView('fleet_assign')} />;
     }
@@ -220,6 +253,7 @@ const AppContent: React.FC = () => {
         />
       ) : null}
       onSetupGuide={() => setWizardOpen(true)}
+      onDriverView={driverBinding ? () => setDriverSessionOpen(true) : undefined}
     >
       {showSetupBanner && (
         <button
