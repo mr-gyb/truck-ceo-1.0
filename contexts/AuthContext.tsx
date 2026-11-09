@@ -100,19 +100,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!user) throw new Error('Not signed in');
 
     const businessId = `biz_${user.uid}`;
-    await setDoc(doc(db, 'businesses', businessId), {
-      name: businessName.trim(),
-      ownerId: user.uid,
-      createdAt: new Date(),
-      subscription: 'free'
-    });
-
+    // Profile FIRST (2026-11-09 fix): the businesses rule reads
+    // users/{uid}.businessId to authorize the business write, so the
+    // business doc can only be created after the profile exists.
     await setDoc(doc(db, 'users', user.uid), {
       email: user.email,
       displayName: pendingName || user.displayName || 'Business Owner',
       role: 'business_owner',
       businessId,
       createdAt: new Date()
+    });
+
+    await setDoc(doc(db, 'businesses', businessId), {
+      name: businessName.trim(),
+      ownerId: user.uid,
+      createdAt: new Date(),
+      subscription: 'free'
     });
 
     console.log('New owner signup — leaving the business empty so the setup wizard guides real data entry.');
