@@ -10,10 +10,43 @@ import {
   signOut,
   type User,
 } from 'firebase/auth';
-import { doc, getDoc, increment, setDoc, updateDoc } from 'firebase/firestore';
+import { arrayUnion, collection, doc, getDoc, increment, setDoc, updateDoc } from 'firebase/firestore';
 import { auth, db, firebaseConfigured } from '../services/firebaseConfig';
 import { lookupInviteCode } from '../services/driverService';
-import type { DriverProfile } from '../types';
+import type { DriverMembership, DriverProfile } from '../types';
+
+/**
+ * Resolve the driver profile for a users/{uid} doc. A team_member doc is
+ * itself the driver profile. An owner/manager doc resolves through its
+ * first driverMembership — redeeming an invite must never overwrite an
+ * owner profile (that overwrite was the 2026-11-08 "role trap": the owner
+ * app then routed the account to the driver feed with no way back).
+ */
+function resolveDriverProfile(data: Record<string, unknown>): DriverProfile | null {
+  const memberships = (data.driverMemberships as DriverMembership[] | undefined) ?? [];
+  if (data.role === 'team_member') {
+    return {
+      email: (data.email as string) ?? '',
+      displayName: (data.displayName as string) ?? 'Driver',
+      role: 'team_member',
+      businessId: data.businessId as string,
+      routeIds: (data.routeIds as string[]) ?? [],
+      driverMemberships: memberships,
+    };
+  }
+  const m = memberships[0];
+  if (m) {
+    return {
+      email: (data.email as string) ?? '',
+      displayName: (data.displayName as string) ?? 'Driver',
+      role: 'team_member',
+      businessId: m.businessId,
+      routeIds: [m.routeId],
+      driverMemberships: memberships,
+    };
+  }
+  return null;
+}
 
 // Lean version of the owner app's AuthContext: drivers are team_members
 // with a businessId and routeIds on users/{uid}. Same join semantics —
@@ -60,12 +93,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const unsub = onAuthStateChanged(authI, async (user) => {
       setCurrentUser(user);
       if (user) {
-        const snap = await getDoc(doc(dbI, 'users', user.uid));
-        if (snap.exists()) {
-          const data = snap.data() as DriverProfile;
-          // Only driver (team_member) profiles belong in this app.
-          setProfile(data.role === 'team_member' ? data : null);
-        } else {
+        try {
+          const snap = await getDoc(doc(dbI, 'users', user.uid));
+          setProfile(snap.exists() ? resolveDriverProfile(snap.data() as Record<string, unknown>) : null);
+        } catch {
           setProfile(null);
         }
       } else {
@@ -116,9 +147,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   /**
-   * Invite-code join, mirroring the owner app's completeDriverJoin: the
-   * signed-in user redeems a code, which writes their team_member profile
-   * bound to the code's business + route and bumps the code's usedCount.
+   * Invite-code join, mirroring the owner app's completeDriverJoin (shared
+   * join semantics, 2026-11-08 fix pass):
+   *  1. users/{uid} is written FIRST, merged — an owner/manager account
+   *     keeps its role and businessId; the binding lands in
+   *     driverMemberships. (The old version overwrote the whole doc, which
+   *     destroyed owner profiles and trapped the account in driver view.)
+   *  2. usedCount + a redemption record land on the GLOBAL inviteCodes doc
+   *     — the count the owner UI reads. (The old version never touched the
+   *     records the owner actually sees beyond this one increment, and
+   *     created no employee record, so joins registered nowhere.)
+   *  3. The employee record is created under the business so the driver
+   *     appears in the owner's team list and Driver Invites screen.
    * Requires the driver to have created an account first (same as owner app).
    */
   const joinWithInviteCode = async (code: string, displayName: string) => {
@@ -127,16 +167,94 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
     const invite = await lookupInviteCode(code);
     if (!invite) throw new Error('That invite code was not found. Check it and try again.');
-    const nextProfile: DriverProfile = {
+    const name = displayName.trim() || currentUser.displayName || currentUser.email || 'Driver';
+    const redemption = {
+      uid: currentUser.uid,
+      email: currentUser.email || null,
+      displayName: name,
+      routeId: invite.routeId,
+      joinedAt: new Date(),
+    };
+
+    // (1) Profile first, merged, owner roles preserved.
+    const userRef = doc(db, 'users', currentUser.uid);
+    const existingSnap = await getDoc(userRef);
+    const existing = (existingSnap.exists() ? (existingSnap.data() as Record<string, unknown>) : null);
+    const isOwnerRole = existing?.role === 'business_owner' || existing?.role === 'business_manager';
+    const membership: DriverMembership = {
+      businessId: invite.businessId,
+      routeId: invite.routeId,
+      routeName: invite.routeName,
+      joinedAt: new Date(),
+    };
+    const priorMemberships = ((existing?.driverMemberships as DriverMembership[] | undefined) ?? []).filter(
+      (m) => !(m.businessId === invite.businessId && m.routeId === invite.routeId),
+    );
+    const memberships = [...priorMemberships, membership];
+    if (isOwnerRole) {
+      await setDoc(userRef, { driverMemberships: memberships }, { merge: true });
+    } else {
+      await setDoc(userRef, {
+        email: currentUser.email ?? '',
+        displayName: name,
+        role: 'team_member',
+        businessId: invite.businessId,
+        routeIds: [invite.routeId],
+        driverMemberships: memberships,
+      });
+    }
+
+    // (2) Count + redemption on the global invite doc (owner UI reads here).
+    await updateDoc(doc(db, 'inviteCodes', invite.code), {
+      usedCount: increment(1),
+      redemptions: arrayUnion(redemption),
+    });
+    // Business-level copy is owner-write-only in the rules — best effort.
+    try {
+      await updateDoc(doc(db, 'businesses', invite.businessId, 'invites', invite.code), {
+        usedCount: increment(1),
+        redemptions: arrayUnion(redemption),
+      });
+    } catch {
+      // Not an error: the global doc above is the source of truth.
+    }
+
+    // (3) Employee record so the owner sees this driver on the team list.
+    try {
+      const empRef = doc(collection(db, 'businesses', invite.businessId, 'employees'));
+      await setDoc(empRef, {
+        name,
+        role: 'driver',
+        userId: currentUser.uid,
+        email: currentUser.email || null,
+        assignedRoutes: [invite.routeId],
+        status: 'active',
+        hoursThisWeek: 0,
+        engagementScore: 0,
+        salesHistory: [],
+        attendance: [],
+        vacationDaysUsed: 0,
+        sickDaysUsed: 0,
+        inviteCode: invite.code,
+        createdAt: new Date(),
+      });
+      if (!isOwnerRole) {
+        await updateDoc(userRef, { employeeId: empRef.id });
+      }
+    } catch (err) {
+      // A rules denial here must not fail the join itself — the profile and
+      // the invite redemption above already landed.
+      console.warn('Employee record create failed on join', err);
+    }
+
+    setProfile({
       email: currentUser.email ?? '',
-      displayName: displayName.trim() || currentUser.email || 'Driver',
+      displayName: name,
       role: 'team_member',
       businessId: invite.businessId,
       routeIds: [invite.routeId],
-    };
-    await setDoc(doc(db, 'users', currentUser.uid), nextProfile);
-    await updateDoc(doc(db, 'inviteCodes', invite.code), { usedCount: increment(1) });
-    setProfile(nextProfile);
+      driverMemberships: memberships,
+    });
   };
 
   const logout = async () => {
