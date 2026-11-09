@@ -15,9 +15,12 @@ interface LayoutProps {
   /** Owner-only: reopens the setup wizard. When provided, "Setup guide"
       appears in the MORE OPTIONS menu. */
   onSetupGuide?: () => void;
+  /** Dual-role accounts only: switches to the real driver interface.
+      When provided, a "Driver view" button appears in the header. */
+  onDriverView?: () => void;
 }
 
-export const Layout: React.FC<LayoutProps> = ({ children, activeView, onViewChange, floating, onSetupGuide }) => {
+export const Layout: React.FC<LayoutProps> = ({ children, activeView, onViewChange, floating, onSetupGuide, onDriverView }) => {
   const { logout, userProfile } = useAuth();
   const [isBottomMenuOpen, setIsBottomMenuOpen] = useState(false);
   // Show THIS business's real name in the header — never a hardcoded one.
@@ -57,6 +60,15 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeView, onViewChan
           <h1 className="text-lg font-black tracking-tighter uppercase leading-none">{businessName}</h1>
         </div>
         <div className="flex items-center gap-5">
+          {onDriverView && (
+            <button
+              onClick={onDriverView}
+              className="flex items-center gap-2 bg-[#FFD700] text-black rounded-full px-3.5 py-1.5 active:scale-95 transition-all"
+            >
+              <i className="fas fa-id-card text-xs"></i>
+              <span className="text-[9px] font-black uppercase tracking-widest">Driver view</span>
+            </button>
+          )}
           <button className="text-white hover:text-[#FFD700] transition-colors relative">
             <i className="fas fa-bell"></i>
             <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-[#FFD700] rounded-full border-2 border-black"></span>
@@ -94,6 +106,12 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeView, onViewChan
               onClick={() => handleBottomMenuClick('team')}
             />
             <MenuButton
+              label="Driver Invites"
+              icon="fa-key"
+              active={activeView === 'driver_invites'}
+              onClick={() => handleBottomMenuClick('driver_invites')}
+            />
+            <MenuButton
               label="Marketing Promos"
               icon="fa-certificate"
               active={activeView === 'promos'}
@@ -125,6 +143,18 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeView, onViewChan
                 }}
               />
             )}
+
+            <div className="h-px bg-gray-100 my-2" />
+
+            <MenuButton
+              label="Sign out"
+              icon="fa-sign-out-alt"
+              active={false}
+              onClick={() => {
+                setIsBottomMenuOpen(false);
+                void handleLogout();
+              }}
+            />
           </div>
         </div>
       )}
