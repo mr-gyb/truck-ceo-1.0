@@ -90,7 +90,9 @@ export const DriverDayProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         setEod(null);
         return;
       }
-      const existing = await getEodReport(profile.businessId, route.id, todayId());
+      const existing = await getEodReport(profile.businessId, route.id, todayId()).catch(
+        () => null,
+      );
       if (!cancelled) setEod(existing);
     })();
     return () => {
