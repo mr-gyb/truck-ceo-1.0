@@ -94,3 +94,24 @@ jobs:
       - name: Deploy Storage rules (non-blocking)
         continue-on-error: true
         run: npx -y firebase-tools@latest deploy --only storage --project truck-ceo
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      # Invoker repair (2026-11-09, approved by Chris): the six function
+      # services were created before the deployer could set their invoker
+      # policy, so every callable returns 403 at the Cloud Run door and the
+      # app surfaces functions/internal. This grants allUsers the Cloud Run
+      # Invoker role on each function service (the standard public-invoke
+      # policy for Firebase callables; the functions still require an
+      # authenticated app user in-handler). Idempotent: safe on every run.
+      # Restored 2026-11-09 after the authDomain commit accidentally
+      # dropped it (its base file predated this step).
+      - name: Ensure function invoker access
+        run: |
+          for svc in askassistant savefeedcredentials reprocesssettlement ingestsettlementpdf ingestping diagping; do
+            gcloud run services add-iam-policy-binding "$svc" \
+              --region=us-central1 \
+              --project=truck-ceo \
+              --member=allUsers \
+              --role=roles/run.invoker
+          done
