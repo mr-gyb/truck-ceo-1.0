@@ -1,20 +1,20 @@
-# Firestore + Storage security rules for the TruckCEO role model
-# ------------------------------------------------------------------
-# These are NOT auto-deployed (firebase.json only deploys hosting).
-# Apply them in the Firebase console: Firestore Database > Rules
-# (and Storage > Rules for the second block), then Publish.
-#
-# Model:
-#   users/{uid}                -> { role: 'business_owner' | 'team_member', businessId, employeeId?, routeIds? }
-#   inviteCodes/{CODE}         -> global lookup for driver join (readable by any authed user)
-#   businesses/{bid}/...      -> everything under a business is tenant-isolated
-#   businesses/{bid}/routes/{rid}/eod|photos|updates -> driver-submitted data
-#
-# 2026-09-30: Replaced the recursive /{subcollection=**} wildcard with
-# explicit per-collection matches. The wildcard's list (query) evaluation
-# was denying reads ("Missing or insufficient permissions") while single-doc
-# gets on the same paths were allowed. Explicit matches keep identical
-# tenant-isolation semantics with predictable list behavior.
+// Firestore + Storage security rules for the TruckCEO role model
+// ------------------------------------------------------------------
+// These are NOT auto-deployed (firebase.json only deploys hosting).
+// Apply them in the Firebase console: Firestore Database > Rules
+// (and Storage > Rules for the second block), then Publish.
+//
+// Model:
+//   users/{uid}                -> { role: 'business_owner' | 'team_member', businessId, employeeId?, routeIds? }
+//   inviteCodes/{CODE}         -> global lookup for driver join (readable by any authed user)
+//   businesses/{bid}/...      -> everything under a business is tenant-isolated
+//   businesses/{bid}/routes/{rid}/eod|photos|updates -> driver-submitted data
+//
+// 2026-09-30: Replaced the recursive /{subcollection=**} wildcard with
+// explicit per-collection matches. The wildcard's list (query) evaluation
+// was denying reads ("Missing or insufficient permissions") while single-doc
+// gets on the same paths were allowed. Explicit matches keep identical
+// tenant-isolation semantics with predictable list behavior.
 
 rules_version = '2';
 service cloud.firestore {

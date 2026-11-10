@@ -1,33 +1,33 @@
-# Firebase Storage security rules for the TruckCEO role model
-# ------------------------------------------------------------------
-# STAGED REMEDY (2026-11-07) — not yet deployed. Ship it only if the
-# live retest confirms settlement uploads are blocked at the Storage
-# layer. It deploys via the "Deploy Storage rules (non-blocking)"
-# step in .github/workflows/firebase-hosting-merge.yml, or manually
-# in the Firebase console: Storage > Rules, then Publish.
-#
-# WARNING: deploying Storage rules REPLACES whatever rules are
-# currently configured in the console for the WHOLE bucket
-# (truck-ceo.firebasestorage.app). Every client Storage path the app
-# uses today is therefore covered below — do not deploy a partial
-# version of this file:
-#   businesses/{bid}/settlement-uploads/**  SettlementUploader (owner)
-#   businesses/{bid}/csv-uploads/**         CSVUploader / CSVService
-#   driver-photos/{bid}/**                  DriverHome photo uploads
-# The settlement processing function reads uploads server-side via
-# the Admin SDK, which bypasses these rules entirely.
-#
-# Model (mirrors firestore.rules exactly):
-#   users/{uid}  -> { role: 'business_owner' | 'team_member', businessId }
-#   A signed-in user may touch only the paths of the business named
-#   in their own users doc. Upload UIs are owner-only, so writes on
-#   the two upload prefixes require the owner role; driver photos
-#   are written by team members, so that prefix allows members.
-#   Everything else is denied by default (no match = no access).
-#
-# Like firestore.rules, matches are explicit per path segment (no
-# recursive wildcards): the client code only ever writes flat file
-# names under these prefixes.
+// Firebase Storage security rules for the TruckCEO role model
+// ------------------------------------------------------------------
+// STAGED REMEDY (2026-11-07) — not yet deployed. Ship it only if the
+// live retest confirms settlement uploads are blocked at the Storage
+// layer. It deploys via the "Deploy Storage rules (non-blocking)"
+// step in .github/workflows/firebase-hosting-merge.yml, or manually
+// in the Firebase console: Storage > Rules, then Publish.
+//
+// WARNING: deploying Storage rules REPLACES whatever rules are
+// currently configured in the console for the WHOLE bucket
+// (truck-ceo.firebasestorage.app). Every client Storage path the app
+// uses today is therefore covered below — do not deploy a partial
+// version of this file:
+//   businesses/{bid}/settlement-uploads/**  SettlementUploader (owner)
+//   businesses/{bid}/csv-uploads/**         CSVUploader / CSVService
+//   driver-photos/{bid}/**                  DriverHome photo uploads
+// The settlement processing function reads uploads server-side via
+// the Admin SDK, which bypasses these rules entirely.
+//
+// Model (mirrors firestore.rules exactly):
+//   users/{uid}  -> { role: 'business_owner' | 'team_member', businessId }
+//   A signed-in user may touch only the paths of the business named
+//   in their own users doc. Upload UIs are owner-only, so writes on
+//   the two upload prefixes require the owner role; driver photos
+//   are written by team members, so that prefix allows members.
+//   Everything else is denied by default (no match = no access).
+//
+// Like firestore.rules, matches are explicit per path segment (no
+// recursive wildcards): the client code only ever writes flat file
+// names under these prefixes.
 
 rules_version = '2';
 service firebase.storage {
