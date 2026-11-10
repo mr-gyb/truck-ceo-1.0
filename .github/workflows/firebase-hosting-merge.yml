@@ -23,7 +23,7 @@ jobs:
       - run: npm ci && npm run build
         env:
           VITE_FIREBASE_API_KEY: AIzaSyAf60UgNSyncGk-6j55UXjZ1U54IxJpIQU
-          VITE_FIREBASE_AUTH_DOMAIN: truck-ceo.firebaseapp.com
+          VITE_FIREBASE_AUTH_DOMAIN: truck-ceo.web.app
           VITE_FIREBASE_PROJECT_ID: truck-ceo
           VITE_FIREBASE_STORAGE_BUCKET: truck-ceo.firebasestorage.app
           VITE_FIREBASE_MESSAGING_SENDER_ID: "419699908912"
@@ -37,7 +37,7 @@ jobs:
       - run: npm ci --prefix driver-app && npm run build --prefix driver-app
         env:
           VITE_FIREBASE_API_KEY: AIzaSyAf60UgNSyncGk-6j55UXjZ1U54IxJpIQU
-          VITE_FIREBASE_AUTH_DOMAIN: truck-ceo.firebaseapp.com
+          VITE_FIREBASE_AUTH_DOMAIN: truck-ceo.web.app
           VITE_FIREBASE_PROJECT_ID: truck-ceo
           VITE_FIREBASE_STORAGE_BUCKET: truck-ceo.firebasestorage.app
           VITE_FIREBASE_MESSAGING_SENDER_ID: "419699908912"
@@ -94,22 +94,3 @@ jobs:
       - name: Deploy Storage rules (non-blocking)
         continue-on-error: true
         run: npx -y firebase-tools@latest deploy --only storage --project truck-ceo
-
-      - uses: google-github-actions/setup-gcloud@v2
-
-      # Invoker repair (2026-11-09, approved by Chris): the six function
-      # services were created before the deployer could set their invoker
-      # policy, so every callable returns 403 at the Cloud Run door and the
-      # app surfaces functions/internal. This grants allUsers the Cloud Run
-      # Invoker role on each function service (the standard public-invoke
-      # policy for Firebase callables; the functions still require an
-      # authenticated app user in-handler). Idempotent: safe on every run.
-      - name: Ensure function invoker access
-        run: |
-          for svc in askassistant savefeedcredentials reprocesssettlement ingestsettlementpdf ingestping diagping; do
-            gcloud run services add-iam-policy-binding "$svc" \
-              --region=us-central1 \
-              --project=truck-ceo \
-              --member=allUsers \
-              --role=roles/run.invoker
-          done
