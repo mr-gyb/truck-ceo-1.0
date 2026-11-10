@@ -6,6 +6,7 @@ import { ToastContainer } from './ToastContainer';
 import { RouteFormModal } from './forms/RouteFormModal';
 import { StoreFormModal } from './forms/StoreFormModal';
 import { DriverInvite } from './DriverInvite';
+import { SettlementHistory } from './SettlementHistory';
 import { ConfirmDialog } from './ConfirmDialog';
 
 export const RoutesManagement: React.FC = () => {
@@ -231,6 +232,9 @@ export const RoutesManagement: React.FC = () => {
 
                   {/* Driver Invite Codes */}
                   <DriverInvite routeId={route.id} routeName={route.name} />
+
+                  {/* Settlement History (backend-ingested statements) */}
+                  <SettlementHistory routeId={route.id} />
 
                   {/* Stores Section */}
                   <div>
