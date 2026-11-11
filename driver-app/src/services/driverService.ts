@@ -7,6 +7,7 @@ import {
   setDoc,
 } from 'firebase/firestore';
 import { db } from './firebaseConfig';
+import { resolveMembershipRoutes } from './membershipRoutes';
 import {
   toRoute,
   type DriverMembership,
@@ -53,28 +54,18 @@ export async function getMembershipRoutes(profile: {
   routeIds: string[];
   driverMemberships?: DriverMembership[];
 }): Promise<Route[]> {
-  if (!db) return [];
-  const pairs: Array<{ businessId: string; routeId: string }> = [];
-  const seen = new Set<string>();
-  const add = (businessId: string, routeId: string) => {
-    const key = `${businessId}/${routeId}`;
-    if (businessId && routeId && !seen.has(key)) {
-      seen.add(key);
-      pairs.push({ businessId, routeId });
-    }
-  };
-  for (const m of profile.driverMemberships ?? []) add(m.businessId, m.routeId);
-  for (const rid of profile.routeIds ?? []) add(profile.businessId, rid);
-  const routes: Route[] = [];
-  for (const p of pairs) {
-    const snap = await getDoc(doc(db, 'businesses', p.businessId, 'routes', p.routeId));
-    if (snap.exists()) {
-      const route = toRoute({ id: snap.id, ...(snap.data() as object) } as Parameters<typeof toRoute>[0]);
-      route.businessId = p.businessId;
-      routes.push(route);
-    }
-  }
-  return routes;
+  // Pair building + per-route tolerance live in membershipRoutes.ts
+  // (pure, unit-tested). A route the rules deny — e.g. an older route in
+  // a business the profile no longer points at after a cross-business
+  // join — is skipped there, never thrown into the caller's refresh.
+  return resolveMembershipRoutes(profile, async (businessId, routeId) => {
+    if (!db) return null;
+    const snap = await getDoc(doc(db, 'businesses', businessId, 'routes', routeId));
+    if (!snap.exists()) return null;
+    const route = toRoute({ id: snap.id, ...(snap.data() as object) } as Parameters<typeof toRoute>[0]);
+    route.businessId = businessId;
+    return route;
+  });
 }
 
 /**
