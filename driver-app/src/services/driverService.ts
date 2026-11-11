@@ -9,10 +9,12 @@ import {
 import { db } from './firebaseConfig';
 import {
   toRoute,
+  type DriverMembership,
   type DriverScore,
   type EodReport,
   type InviteCode,
   type Route,
+  type RouteGuideData,
 } from '../types';
 
 // Reads/writes against the SAME Firestore project and collections the
@@ -30,10 +32,74 @@ export async function getAssignedRoutes(
   for (const rid of routeIds) {
     const snap = await getDoc(doc(db, 'businesses', businessId, 'routes', rid));
     if (snap.exists()) {
-      routes.push(toRoute({ id: snap.id, ...(snap.data() as object) } as Parameters<typeof toRoute>[0]));
+      const route = toRoute({ id: snap.id, ...(snap.data() as object) } as Parameters<typeof toRoute>[0]);
+      route.businessId = businessId;
+      routes.push(route);
     }
   }
   return routes;
+}
+
+/**
+ * Fetch every route a driver holds a membership in (Chris's directive,
+ * 2026-11-10: a driver toggles between ALL routes they were invited to).
+ * Memberships are the many-to-many source of truth; each route is read
+ * from its OWN business, because memberships can span businesses.
+ * Falls back to (businessId, routeIds) for profiles written before
+ * memberships existed.
+ */
+export async function getMembershipRoutes(profile: {
+  businessId: string;
+  routeIds: string[];
+  driverMemberships?: DriverMembership[];
+}): Promise<Route[]> {
+  if (!db) return [];
+  const pairs: Array<{ businessId: string; routeId: string }> = [];
+  const seen = new Set<string>();
+  const add = (businessId: string, routeId: string) => {
+    const key = `${businessId}/${routeId}`;
+    if (businessId && routeId && !seen.has(key)) {
+      seen.add(key);
+      pairs.push({ businessId, routeId });
+    }
+  };
+  for (const m of profile.driverMemberships ?? []) add(m.businessId, m.routeId);
+  for (const rid of profile.routeIds ?? []) add(profile.businessId, rid);
+  const routes: Route[] = [];
+  for (const p of pairs) {
+    const snap = await getDoc(doc(db, 'businesses', p.businessId, 'routes', p.routeId));
+    if (snap.exists()) {
+      const route = toRoute({ id: snap.id, ...(snap.data() as object) } as Parameters<typeof toRoute>[0]);
+      route.businessId = p.businessId;
+      routes.push(route);
+    }
+  }
+  return routes;
+}
+
+/**
+ * Latest generated guide book + route card for a route (written by the
+ * backend on settlement ingest). Null until a settlement has been
+ * ingested for the route — an honest "no guide yet", never a mock.
+ */
+export async function getLatestRouteGuide(
+  businessId: string,
+  routeId: string,
+): Promise<RouteGuideData | null> {
+  if (!db) return null;
+  try {
+    const snap = await getDocs(
+      collection(db, 'businesses', businessId, 'routes', routeId, 'guides'),
+    );
+    if (snap.empty) return null;
+    const docs = snap.docs
+      .map((d) => d.data() as RouteGuideData)
+      .sort((a, b) => b.weekEnding.localeCompare(a.weekEnding));
+    return docs[0] ?? null;
+  } catch (err) {
+    console.warn('Route guide read failed; showing empty state.', err);
+    return null;
+  }
 }
 
 /** Look up an invite code (owner app stores them at inviteCodes/{CODE}). */
