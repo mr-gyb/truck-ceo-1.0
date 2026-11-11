@@ -160,8 +160,8 @@
     {
       "day": "Thu",
       "off": false,
-      "orderedTotal": 545,
-      "truckTotal": 655,
+      "orderedTotal": 475,
+      "truckTotal": 585,
       "stops": [
         {
           "storeNumber": "0193",
@@ -175,8 +175,8 @@
           "storeNumber": "0320",
           "storeName": "ShopRite #0320",
           "address": "250 Barnum Ave Cutoff, Stratford, CT 06614",
-          "pieces": 125,
-          "loadLabel": "Super Heavy",
+          "pieces": 55,
+          "loadLabel": "Light",
           "inventory": false,
           "note": "6:00–6:30 window"
         },
@@ -222,8 +222,8 @@
     {
       "day": "Fri",
       "off": false,
-      "orderedTotal": 565,
-      "truckTotal": 565,
+      "orderedTotal": 650,
+      "truckTotal": 650,
       "stops": [
         {
           "storeNumber": "0193",
@@ -237,8 +237,8 @@
           "storeNumber": "0320",
           "storeName": "ShopRite #0320",
           "address": "250 Barnum Ave Cutoff, Stratford, CT 06614",
-          "pieces": 55,
-          "loadLabel": "Light",
+          "pieces": 140,
+          "loadLabel": "Super Heavy",
           "inventory": true
         },
         {
@@ -288,8 +288,8 @@
     {
       "day": "Sat",
       "off": false,
-      "orderedTotal": 315,
-      "truckTotal": 315,
+      "orderedTotal": 300,
+      "truckTotal": 300,
       "stops": [
         {
           "storeNumber": "0193",
@@ -303,7 +303,7 @@
           "storeNumber": "0320",
           "storeName": "ShopRite #0320",
           "address": "250 Barnum Ave Cutoff, Stratford, CT 06614",
-          "pieces": 125,
+          "pieces": 110,
           "loadLabel": "Super Heavy",
           "inventory": false
         },
