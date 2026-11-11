@@ -3,6 +3,7 @@ import { initializeApp, type FirebaseApp } from 'firebase/app';
 import { getAuth, type Auth } from 'firebase/auth';
 import { getFirestore, type Firestore } from 'firebase/firestore';
 import { getStorage, type FirebaseStorage } from 'firebase/storage';
+import { getFunctions, type Functions } from 'firebase/functions';
 
 // Same pattern as the TruckCEO owner app: config comes from VITE_FIREBASE_*
 // env vars (public web-client values; never commit a .env file). Unlike the
@@ -24,14 +25,17 @@ let app: FirebaseApp | null = null;
 let authInstance: Auth | null = null;
 let dbInstance: Firestore | null = null;
 let storageInstance: FirebaseStorage | null = null;
+let functionsInstance: Functions | null = null;
 
 if (firebaseConfigured) {
   app = initializeApp(firebaseConfig);
   authInstance = getAuth(app);
   dbInstance = getFirestore(app);
   storageInstance = getStorage(app);
+  functionsInstance = getFunctions(app);
 }
 
 export const auth = authInstance;
 export const db = dbInstance;
 export const storage = storageInstance;
+export const functions = functionsInstance;
