@@ -179,6 +179,16 @@ service cloud.firestore {
           allow read: if isMyBusiness(bid);
           allow write: if isMyBusiness(bid) && myProfile().role == 'business_owner';
         }
+        // Approved baseline route guide (2026-11-11): the final guide/
+        // card pack for the route (depot frame, off days, per-day run
+        // order + guide pieces + inventory flags), one doc at
+        // baselineGuide/current. Seeded by the owner from the approved
+        // pack; the driver app (Route Runner) reads it as the day's
+        // guide. Members read; only owners write, mirroring guides.
+        match /baselineGuide/{docId} {
+          allow read: if isMyBusiness(bid);
+          allow write: if isMyBusiness(bid) && myProfile().role == 'business_owner';
+        }
       }
 
       // Ingestion registry: one entry per ingested item, any source.
