@@ -17,6 +17,48 @@ const formatTime = (hhmm: string) => {
   return `${hour}:${String(m).padStart(2, '0')} ${suffix}`;
 };
 
+/**
+ * The guide's line for a stop (baseline guide, 2026-11-11): today's
+ * guide pieces + load label, the inventory flag, and the guide note.
+ * Rendered only when the stop carries guide data — routes without a
+ * loaded guide show nothing extra. Pieces only, never money.
+ */
+export const GuideLine: React.FC<{ stop: Stop; large?: boolean }> = ({ stop, large }) => {
+  if (
+    stop.guidePieces === undefined &&
+    !stop.guideSelfOrders &&
+    !stop.guideInventory &&
+    !stop.guideNote
+  ) {
+    return null;
+  }
+  const text = large ? 'text-sm' : 'text-xs';
+  return (
+    <span className={`mt-1 block ${text} font-semibold text-slate-600`}>
+      <span className="text-slate-900">
+        <i className="fa-solid fa-book-open mr-1 text-[#bfa100]" />
+        Guide:{' '}
+        {stop.guideSelfOrders
+          ? stop.guideApproxPieces != null
+            ? `~${stop.guideApproxPieces} pieces · their own order`
+            : 'their own order'
+          : stop.guidePieces != null
+            ? `${stop.guidePieces} pieces`
+            : '—'}
+      </span>
+      {stop.guideLoadLabel && stop.guideLoadLabel !== 'Self-orders' && (
+        <span> · {stop.guideLoadLabel}</span>
+      )}
+      {stop.guideInventory && (
+        <span className="ml-1.5 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-black uppercase tracking-wide text-amber-800">
+          Inventory
+        </span>
+      )}
+      {stop.guideNote && <span className="block font-medium text-slate-500">{stop.guideNote}</span>}
+    </span>
+  );
+};
+
 export const StopRow: React.FC<{ stop: Stop; onOpen: (stop: Stop) => void }> = ({ stop, onOpen }) => {
   const { visits } = useDriverDay();
   const visit = visits[`${todayId()}:${stop.id}`];
@@ -46,6 +88,7 @@ export const StopRow: React.FC<{ stop: Stop; onOpen: (stop: Stop) => void }> = (
             <span className="text-slate-400">Target time not set yet</span>
           )}
         </span>
+        <GuideLine stop={stop} />
       </span>
       <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-bold ${pill.cls}`}>
         {pill.label}
@@ -66,8 +109,19 @@ export const StopRow: React.FC<{ stop: Stop; onOpen: (stop: Stop) => void }> = (
  * card says so instead of estimating one.
  */
 const KpiCards: React.FC = () => {
-  const { dayStartedAt, piecesLoaded, setPiecesLoaded, eod } = useDriverDay();
+  const { dayStartedAt, piecesLoaded, setPiecesLoaded, eod, guideDay } = useDriverDay();
   const [draft, setDraft] = useState('');
+  const [prefilled, setPrefilled] = useState(false);
+
+  // Guide pre-fill (2026-11-11): when the route carries a baseline
+  // guide, today's truck total is the expected load — the driver
+  // confirms it with one tap (or corrects it) instead of typing.
+  useEffect(() => {
+    if (!prefilled && draft === '' && guideDay?.truckTotal != null) {
+      setDraft(String(guideDay.truckTotal));
+      setPrefilled(true);
+    }
+  }, [guideDay, prefilled, draft]);
 
   const piecesValue = eod ? eod.piecesLeft : piecesLoaded;
   const piecesCaption = eod
@@ -128,6 +182,15 @@ const KpiCards: React.FC = () => {
           </button>
         </form>
       )}
+      {dayStartedAt && piecesLoaded == null && !eod && guideDay?.truckTotal != null && (
+        <p className="mt-2 text-xs font-medium text-slate-500">
+          Pre-filled from today's guide — {guideDay.truckTotal} pieces on the truck
+          {guideDay.orderedTotal != null && guideDay.orderedTotal !== guideDay.truckTotal
+            ? ` (${guideDay.orderedTotal} ordered + self-ordered stops)`
+            : ''}
+          . Change it if the load is different.
+        </p>
+      )}
     </div>
   );
 };
@@ -153,14 +216,17 @@ const mapsUrl = (stop: Stop) =>
  * The stop list below the guide stays as the overview/jump list.
  */
 const GuidedDay: React.FC<{ onGoEod?: () => void }> = ({ onGoEod }) => {
-  const { route, captures, visits, updateVisit, dayStartedAt } = useDriverDay();
+  const { route, captures, visits, updateVisit, dayStartedAt, guide, guideDay, todayStops } =
+    useDriverDay();
   const date = todayId();
 
   const hasCapture = (type: CaptureType, storeId?: string) =>
     captures.some((c) => c.type === type && (storeId === undefined || c.storeId === storeId));
 
   const depotDone = hasCapture('depot');
-  const stops = route?.stops ?? [];
+  // With a baseline guide loaded, the day runs the guide's stops for
+  // today (its run order, its quantities); without one, the registry.
+  const stops = guideDay ? todayStops : (route?.stops ?? []);
   const stopDone = (s: Stop) => STOP_CAPTURES.every((sc) => hasCapture(sc.type, s.id));
   const currentStop = stops.find((s) => !stopDone(s)) ?? null;
   const doneCount = stops.filter((s) => stopDone(s)).length;
@@ -181,7 +247,7 @@ const GuidedDay: React.FC<{ onGoEod?: () => void }> = ({ onGoEod }) => {
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [captures, route?.id]);
+  }, [captures, route?.id, todayStops]);
 
   if (!route) return null;
 
@@ -191,7 +257,31 @@ const GuidedDay: React.FC<{ onGoEod?: () => void }> = ({ onGoEod }) => {
       <div className="mb-4 rounded-2xl border-2 border-black bg-white px-5 py-5 shadow-sm">
         <p className="text-xs font-bold uppercase tracking-widest text-slate-400">Start here</p>
         <h3 className="mt-1 text-lg font-black uppercase tracking-tight">At the depot</h3>
-        <p className="mt-1 text-sm text-slate-600">
+        {guide && (
+          <div className="mt-2 rounded-xl bg-slate-50 px-3.5 py-3 text-sm text-slate-700">
+            <p className="font-bold text-slate-900">
+              <i className="fa-solid fa-warehouse mr-1.5 text-[#bfa100]" />
+              {guide.depot.name}
+            </p>
+            <p className="mt-0.5">{guide.depot.address}</p>
+            <p className="mt-1 font-semibold">
+              In by {formatTime(guide.depot.arriveBy)} · Out by {formatTime(guide.depot.outBy)} ·
+              Parked by {formatTime(guide.depot.parkedBy)}
+            </p>
+            {guideDay?.truckTotal != null && (
+              <p className="mt-1">
+                Today's guide load: <span className="font-bold">{guideDay.truckTotal} pieces</span>{' '}
+                on the truck
+                {guideDay.orderedTotal != null && guideDay.orderedTotal !== guideDay.truckTotal
+                  ? ` (${guideDay.orderedTotal} ordered)`
+                  : ''}
+                {' · '}
+                {stops.length} stops
+              </p>
+            )}
+          </div>
+        )}
+        <p className="mt-2 text-sm text-slate-600">
           Take the load and truck photos to start your day. That is all you need to do here —
           the app reads the numbers from the photos.
         </p>
@@ -242,6 +332,7 @@ const GuidedDay: React.FC<{ onGoEod?: () => void }> = ({ onGoEod }) => {
       </div>
       <h3 className="mt-1 text-xl font-black tracking-tight">{currentStop.name}</h3>
       <p className="text-sm text-slate-500">{currentStop.address}</p>
+      <GuideLine stop={currentStop} large />
       <a
         href={mapsUrl(currentStop)}
         target="_blank"
@@ -274,8 +365,18 @@ export const TodayScreen: React.FC<{
   onOpenStop: (stop: Stop) => void;
   onGoEod?: () => void;
 }> = ({ onOpenStop, onGoEod }) => {
-  const { loading, routes, route, setActiveRouteId, dayStartedAt, startDay, visits } =
-    useDriverDay();
+  const {
+    loading,
+    routes,
+    route,
+    setActiveRouteId,
+    dayStartedAt,
+    startDay,
+    visits,
+    guide,
+    guideDay,
+    todayStops,
+  } = useDriverDay();
 
   if (loading) {
     return (
@@ -301,7 +402,11 @@ export const TodayScreen: React.FC<{
     );
   }
 
-  const doneCount = route.stops.filter(
+  // Today's run: the guide's stops when a baseline guide is loaded,
+  // the registry's stops otherwise. A guide off day has no run at all.
+  const runStops = guideDay ? todayStops : route.stops;
+  const isOffDay = guideDay?.off === true;
+  const doneCount = runStops.filter(
     (s) => visits[`${todayId()}:${s.id}`]?.status === 'done',
   ).length;
 
@@ -326,42 +431,70 @@ export const TodayScreen: React.FC<{
 
       <KpiCards />
 
-      <GuidedDay onGoEod={onGoEod} />
-
-      <div className="mb-4 grid grid-cols-2 gap-2">
-        <CaptureButton type="transfer" label="Transfer" icon="fa-right-left" />
-        <CaptureButton type="other" label="Other photo" icon="fa-camera" />
-      </div>
-
-      {!dayStartedAt ? (
-        <button
-          type="button"
-          onClick={startDay}
-          className="mb-4 w-full rounded-2xl bg-black py-4 text-lg font-black uppercase tracking-tight text-[#FFD700]"
-        >
-          <i className="fa-solid fa-play mr-2" /> Start my day
-        </button>
-      ) : (
-        <div className="mb-4 rounded-2xl border border-green-200 bg-green-50 px-4 py-3 text-sm font-semibold text-green-900">
-          Day started {new Date(dayStartedAt).toLocaleTimeString()} · {doneCount} of{' '}
-          {route.stops.length} stops delivered
-        </div>
-      )}
-
-      {route.stops.length === 0 ? (
-        <div className="rounded-2xl border border-slate-200 bg-white px-5 py-8 text-center shadow-sm">
-          <i className="fa-solid fa-store text-3xl text-slate-300" />
-          <h2 className="mt-3 text-lg font-black uppercase tracking-tight">No stops on this route yet</h2>
+      {isOffDay ? (
+        <div className="mb-4 rounded-2xl border border-slate-200 bg-white px-5 py-8 text-center shadow-sm">
+          <i className="fa-solid fa-moon text-3xl text-slate-300" />
+          <h2 className="mt-3 text-lg font-black uppercase tracking-tight">Day off</h2>
           <p className="mt-2 text-sm text-slate-600">
-            This route has no stores listed. Once stores are added in TruckCEO, they will show
-            up here in order.
+            Your route guide has no deliveries today. Enjoy the day off — the guide picks back
+            up on the next delivery day.
           </p>
         </div>
       ) : (
-        <div className="space-y-2.5">
-          {route.stops.map((stop) => (
-            <StopRow key={stop.id} stop={stop} onOpen={onOpenStop} />
-          ))}
+        <>
+          <GuidedDay onGoEod={onGoEod} />
+
+          <div className="mb-4 grid grid-cols-2 gap-2">
+            <CaptureButton type="transfer" label="Transfer" icon="fa-right-left" />
+            <CaptureButton type="other" label="Other photo" icon="fa-camera" />
+          </div>
+
+          {!dayStartedAt ? (
+            <button
+              type="button"
+              onClick={startDay}
+              className="mb-4 w-full rounded-2xl bg-black py-4 text-lg font-black uppercase tracking-tight text-[#FFD700]"
+            >
+              <i className="fa-solid fa-play mr-2" /> Start my day
+            </button>
+          ) : (
+            <div className="mb-4 rounded-2xl border border-green-200 bg-green-50 px-4 py-3 text-sm font-semibold text-green-900">
+              Day started {new Date(dayStartedAt).toLocaleTimeString()} · {doneCount} of{' '}
+              {runStops.length} stops delivered
+            </div>
+          )}
+
+          {runStops.length === 0 ? (
+            <div className="rounded-2xl border border-slate-200 bg-white px-5 py-8 text-center shadow-sm">
+              <i className="fa-solid fa-store text-3xl text-slate-300" />
+              <h2 className="mt-3 text-lg font-black uppercase tracking-tight">No stops on this route yet</h2>
+              <p className="mt-2 text-sm text-slate-600">
+                This route has no stores listed. Once stores are added in TruckCEO, they will show
+                up here in order.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-2.5">
+              {runStops.map((stop) => (
+                <StopRow key={stop.id} stop={stop} onOpen={onOpenStop} />
+              ))}
+            </div>
+          )}
+        </>
+      )}
+
+      {guide && guide.notes.length > 0 && (
+        <div className="mt-4 rounded-2xl border border-slate-200 bg-white px-4 py-3.5 shadow-sm">
+          <p className="text-xs font-black uppercase tracking-widest text-slate-500">
+            <i className="fa-solid fa-book-open mr-1.5 text-[#bfa100]" /> Route guide notes
+          </p>
+          <ul className="mt-2 space-y-1.5">
+            {guide.notes.map((n) => (
+              <li key={n} className="text-sm font-medium text-slate-600">
+                {n}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
     </div>

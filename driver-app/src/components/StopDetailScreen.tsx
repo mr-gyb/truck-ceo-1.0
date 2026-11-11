@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { todayId, useDriverDay } from '../contexts/DriverDayContext';
+import { GuideLine } from './TodayScreen';
 import type { PhotoKind, Stop } from '../types';
 
 // Photo prompts (finalized 2026-11-08): delivery + stales at EVERY stop;
@@ -89,6 +90,12 @@ export const StopDetailScreen: React.FC<{ stop: Stop; onBack: () => void }> = ({
           {stop.storeNumber ? ` · Store #${stop.storeNumber}` : ''}
         </p>
       </div>
+
+      {(stop.guidePieces !== undefined || stop.guideSelfOrders || stop.guideInventory) && (
+        <div className="mt-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm">
+          <GuideLine stop={stop} large />
+        </div>
+      )}
 
       {status === 'pending' && (
         <button

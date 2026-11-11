@@ -198,7 +198,8 @@ const VoiceNoteButton: React.FC<{ onSaved: () => Promise<void> }> = ({ onSaved }
 
 export const EodScreen: React.FC = () => {
   const { profile, currentUser } = useAuth();
-  const { route, eod, setEod, captures, visits, refreshCaptures } = useDriverDay();
+  const { route, eod, setEod, captures, visits, refreshCaptures, guideDay, todayStops } =
+    useDriverDay();
   const [confirmed, setConfirmed] = useState<Partial<Record<FieldKey, boolean>>>({});
   const [deviceLocation, setDeviceLocation] = useState<string | null>(null);
   const [locBusy, setLocBusy] = useState(false);
@@ -212,12 +213,16 @@ export const EodScreen: React.FC = () => {
         ? deriveEodDraft({
             captures,
             visits,
-            stops: route.stops,
+            // With a baseline guide loaded, the day's run is the guide
+            // day's stops — stops-completed is measured against the
+            // run the driver was actually given, not the full registry
+            // (a Tuesday EOD must not report Burger King/C-Town missed).
+            stops: guideDay ? todayStops : route.stops,
             date: todayId(),
             deviceLocation,
           })
         : null,
-    [captures, visits, route, deviceLocation],
+    [captures, visits, route, deviceLocation, guideDay, todayStops],
   );
 
   const submitted = eod != null;
