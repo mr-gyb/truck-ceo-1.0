@@ -28,7 +28,7 @@ export const ScoreScreen: React.FC = () => {
       // to leave this tab on the skeleton forever (2026-11-08 defect).
       try {
         if (!profile || !route) return;
-        const latest = await getLatestDriverScore(profile.businessId, route.id);
+        const latest = await getLatestDriverScore(route.businessId ?? profile.businessId, route.id);
         if (!cancelled) setScore(latest);
       } catch {
         if (!cancelled) setScore(null);
@@ -39,7 +39,7 @@ export const ScoreScreen: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [profile?.businessId, route?.id]);
+  }, [profile?.businessId, route?.businessId, route?.id]);
 
   if (loading) return <div className="h-40 animate-pulse rounded-2xl bg-slate-200" />;
 
