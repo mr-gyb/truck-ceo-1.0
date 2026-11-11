@@ -1,0 +1,346 @@
+{
+  "kind": "baseline",
+  "routeNumber": "7823",
+  "version": "2026-11-11",
+  "source": "Chris's approved baseline week + final quantities, 2026-11-11 (guide + DRAFT FINAL driver card pack)",
+  "depot": {
+    "name": "Flowers Depot — Shelton",
+    "address": "100 Trap Falls Rd Ext, Shelton, CT 06484",
+    "arriveBy": "04:30",
+    "outBy": "05:30",
+    "parkedBy": "13:00"
+  },
+  "offDays": [
+    "Wed",
+    "Sun"
+  ],
+  "weekGoalPieces": 2500,
+  "notes": [
+    "Inventory locks — Mon: Walmart + Stop & Shop · Tue: Family Dollars · Fri: BJ's + ShopRite. No inventory Wed, Thu, Sat or Sun.",
+    "Family Dollars: no Saturday delivery (for now).",
+    "FD Access Rd's goal (120/wk) is well above what it usually moves (~69/wk) — watch stales if it is stocked to the full 120.",
+    "Route goal: 2,500 pieces a week on the truck, including TK (Tastykake) and promotions."
+  ],
+  "days": [
+    {
+      "day": "Mon",
+      "off": false,
+      "orderedTotal": 440,
+      "truckTotal": 550,
+      "stops": [
+        {
+          "storeNumber": "0193",
+          "storeName": "BJ's #0193",
+          "address": "955 Ferry Blvd, Stratford, CT 06614",
+          "pieces": 100,
+          "loadLabel": "Heavy",
+          "inventory": false
+        },
+        {
+          "storeNumber": "0320",
+          "storeName": "ShopRite #0320",
+          "address": "250 Barnum Ave Cutoff, Stratford, CT 06614",
+          "pieces": 55,
+          "loadLabel": "Light",
+          "inventory": false,
+          "note": "6:00–6:30 window"
+        },
+        {
+          "storeNumber": "2585",
+          "storeName": "Walmart #2585",
+          "address": "150 Barnum Ave Cutoff, Stratford, CT 06614",
+          "pieces": 85,
+          "loadLabel": "Heavy",
+          "inventory": true,
+          "note": "Shrink watch — 265 units on the last shrink report"
+        },
+        {
+          "storeNumber": "893",
+          "storeName": "Burger King #893",
+          "address": "1540 Barnum Ave, Stratford, CT 06614",
+          "pieces": null,
+          "approxPieces": 110,
+          "loadLabel": "Self-orders",
+          "inventory": false,
+          "selfOrders": true,
+          "note": "BK sets its own order — just deliver"
+        },
+        {
+          "storeNumber": "0639",
+          "storeName": "Stop & Shop #0639",
+          "address": "200 E Main St, Stratford, CT 06614",
+          "pieces": 155,
+          "loadLabel": "Heavy",
+          "inventory": true
+        },
+        {
+          "storeNumber": null,
+          "storeName": "C-Town",
+          "address": "360 Boston Ave, Stratford, CT 06614",
+          "pieces": 45,
+          "loadLabel": "Light",
+          "inventory": false,
+          "note": "Last stop"
+        }
+      ]
+    },
+    {
+      "day": "Tue",
+      "off": false,
+      "orderedTotal": 450,
+      "truckTotal": 450,
+      "stops": [
+        {
+          "storeNumber": "0193",
+          "storeName": "BJ's #0193",
+          "address": "955 Ferry Blvd, Stratford, CT 06614",
+          "pieces": 40,
+          "loadLabel": "Fix-up",
+          "inventory": false
+        },
+        {
+          "storeNumber": "0320",
+          "storeName": "ShopRite #0320",
+          "address": "250 Barnum Ave Cutoff, Stratford, CT 06614",
+          "pieces": 125,
+          "loadLabel": "Super Heavy",
+          "inventory": false
+        },
+        {
+          "storeNumber": "2585",
+          "storeName": "Walmart #2585",
+          "address": "150 Barnum Ave Cutoff, Stratford, CT 06614",
+          "pieces": 40,
+          "loadLabel": "Super Light",
+          "inventory": false,
+          "note": "Shrink watch — 265 units on the last shrink report"
+        },
+        {
+          "storeNumber": "0639",
+          "storeName": "Stop & Shop #0639",
+          "address": "200 E Main St, Stratford, CT 06614",
+          "pieces": 65,
+          "loadLabel": "Light",
+          "inventory": false
+        },
+        {
+          "storeNumber": "03639",
+          "storeName": "FD Access Rd",
+          "address": "60 Access Rd, Stratford, CT 06615",
+          "pieces": 60,
+          "loadLabel": "Heavy",
+          "inventory": true
+        },
+        {
+          "storeNumber": "02561",
+          "storeName": "FD Boston Ave",
+          "address": "310 Boston Ave, Stratford, CT 06614",
+          "pieces": 60,
+          "loadLabel": "Heavy",
+          "inventory": true
+        },
+        {
+          "storeNumber": "12681",
+          "storeName": "FD Barnum Ave",
+          "address": "1100 Barnum Ave, Stratford, CT 06614",
+          "pieces": 60,
+          "loadLabel": "Heavy",
+          "inventory": true,
+          "note": "Last stop"
+        }
+      ]
+    },
+    {
+      "day": "Wed",
+      "off": true,
+      "orderedTotal": null,
+      "truckTotal": null,
+      "stops": []
+    },
+    {
+      "day": "Thu",
+      "off": false,
+      "orderedTotal": 545,
+      "truckTotal": 655,
+      "stops": [
+        {
+          "storeNumber": "0193",
+          "storeName": "BJ's #0193",
+          "address": "955 Ferry Blvd, Stratford, CT 06614",
+          "pieces": 95,
+          "loadLabel": "Heavy",
+          "inventory": false
+        },
+        {
+          "storeNumber": "0320",
+          "storeName": "ShopRite #0320",
+          "address": "250 Barnum Ave Cutoff, Stratford, CT 06614",
+          "pieces": 125,
+          "loadLabel": "Super Heavy",
+          "inventory": false,
+          "note": "6:00–6:30 window"
+        },
+        {
+          "storeNumber": "2585",
+          "storeName": "Walmart #2585",
+          "address": "150 Barnum Ave Cutoff, Stratford, CT 06614",
+          "pieces": 85,
+          "loadLabel": "Heavy",
+          "inventory": false,
+          "note": "Shrink watch — 265 units on the last shrink report"
+        },
+        {
+          "storeNumber": "893",
+          "storeName": "Burger King #893",
+          "address": "1540 Barnum Ave, Stratford, CT 06614",
+          "pieces": null,
+          "approxPieces": 110,
+          "loadLabel": "Self-orders",
+          "inventory": false,
+          "selfOrders": true,
+          "note": "BK sets its own order — just deliver"
+        },
+        {
+          "storeNumber": "0639",
+          "storeName": "Stop & Shop #0639",
+          "address": "200 E Main St, Stratford, CT 06614",
+          "pieces": 150,
+          "loadLabel": "Heavy",
+          "inventory": false
+        },
+        {
+          "storeNumber": null,
+          "storeName": "C-Town",
+          "address": "360 Boston Ave, Stratford, CT 06614",
+          "pieces": 90,
+          "loadLabel": "Heavy",
+          "inventory": false,
+          "note": "Last stop"
+        }
+      ]
+    },
+    {
+      "day": "Fri",
+      "off": false,
+      "orderedTotal": 565,
+      "truckTotal": 565,
+      "stops": [
+        {
+          "storeNumber": "0193",
+          "storeName": "BJ's #0193",
+          "address": "955 Ferry Blvd, Stratford, CT 06614",
+          "pieces": 95,
+          "loadLabel": "Heavy",
+          "inventory": true
+        },
+        {
+          "storeNumber": "0320",
+          "storeName": "ShopRite #0320",
+          "address": "250 Barnum Ave Cutoff, Stratford, CT 06614",
+          "pieces": 55,
+          "loadLabel": "Light",
+          "inventory": true
+        },
+        {
+          "storeNumber": "2585",
+          "storeName": "Walmart #2585",
+          "address": "150 Barnum Ave Cutoff, Stratford, CT 06614",
+          "pieces": 85,
+          "loadLabel": "Heavy",
+          "inventory": false,
+          "note": "Shrink watch — 265 units on the last shrink report"
+        },
+        {
+          "storeNumber": "0639",
+          "storeName": "Stop & Shop #0639",
+          "address": "200 E Main St, Stratford, CT 06614",
+          "pieces": 150,
+          "loadLabel": "Heavy",
+          "inventory": false
+        },
+        {
+          "storeNumber": "03639",
+          "storeName": "FD Access Rd",
+          "address": "60 Access Rd, Stratford, CT 06615",
+          "pieces": 60,
+          "loadLabel": "Heavy",
+          "inventory": false
+        },
+        {
+          "storeNumber": "02561",
+          "storeName": "FD Boston Ave",
+          "address": "310 Boston Ave, Stratford, CT 06614",
+          "pieces": 60,
+          "loadLabel": "Heavy",
+          "inventory": false
+        },
+        {
+          "storeNumber": "12681",
+          "storeName": "FD Barnum Ave",
+          "address": "1100 Barnum Ave, Stratford, CT 06614",
+          "pieces": 60,
+          "loadLabel": "Heavy",
+          "inventory": false,
+          "note": "Last stop"
+        }
+      ]
+    },
+    {
+      "day": "Sat",
+      "off": false,
+      "orderedTotal": 315,
+      "truckTotal": 315,
+      "stops": [
+        {
+          "storeNumber": "0193",
+          "storeName": "BJ's #0193",
+          "address": "955 Ferry Blvd, Stratford, CT 06614",
+          "pieces": 40,
+          "loadLabel": "Fix-up",
+          "inventory": false
+        },
+        {
+          "storeNumber": "0320",
+          "storeName": "ShopRite #0320",
+          "address": "250 Barnum Ave Cutoff, Stratford, CT 06614",
+          "pieces": 125,
+          "loadLabel": "Super Heavy",
+          "inventory": false
+        },
+        {
+          "storeNumber": "2585",
+          "storeName": "Walmart #2585",
+          "address": "150 Barnum Ave Cutoff, Stratford, CT 06614",
+          "pieces": 40,
+          "loadLabel": "Super Light",
+          "inventory": false,
+          "note": "Shrink watch — 265 units on the last shrink report"
+        },
+        {
+          "storeNumber": "0639",
+          "storeName": "Stop & Shop #0639",
+          "address": "200 E Main St, Stratford, CT 06614",
+          "pieces": 65,
+          "loadLabel": "Light",
+          "inventory": false
+        },
+        {
+          "storeNumber": null,
+          "storeName": "C-Town",
+          "address": "360 Boston Ave, Stratford, CT 06614",
+          "pieces": 45,
+          "loadLabel": "Heavy",
+          "inventory": false,
+          "note": "Last stop"
+        }
+      ]
+    },
+    {
+      "day": "Sun",
+      "off": true,
+      "orderedTotal": null,
+      "truckTotal": null,
+      "stops": []
+    }
+  ]
+}
