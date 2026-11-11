@@ -269,6 +269,53 @@ export interface SettlementRecord {
   registryId: string;
 }
 
+/* ------------------------------------------------------------------ *
+ * Generated driver guide book + route card (Chris's directive,
+ * 2026-11-10): when a settlement is ingested for a route, the ingest
+ * pipeline generates these from the settlement's store rows + the
+ * route's store registry and stores them at
+ *   businesses/{bid}/routes/{rid}/guides/{weekEnding}
+ * so any driver picking up the route can run it for the day. Built
+ * ONLY from records — a figure with no source row stays null.
+ * ------------------------------------------------------------------ */
+
+export interface GuideStoreRow {
+  /** Supplier store/customer number — the join key, as on Store. */
+  storeNumber: string;
+  storeName: string;
+  /** Registry address; null when the row has no registry match. */
+  address?: string | null;
+  /** Run order from the registry when confirmed; null otherwise. */
+  sequence?: number | null;
+  /** Settlement-week pieces for this store; null when no row. */
+  pieces?: number | null;
+  /** Settlement-week dollars for this store; null when no row. */
+  sales?: number | null;
+}
+
+export interface RouteGuideData {
+  weekEnding: string;
+  week: number;
+  routeNumber: string;
+  generatedAt: string; // ISO timestamp
+  /** Firestore path of the settlement record this was generated from. */
+  sourceSettlementPath: string;
+  /** The full blueprint book for the route-week. */
+  guideBook: {
+    routeLabel: string;
+    weekPieces: number | null;
+    weekSales: number | null;
+    stalesPct: number | null;
+    stalesAmount: number | null;
+    stores: GuideStoreRow[];
+  };
+  /** The one-page registry sheet: every registry stop, in run order. */
+  routeCard: {
+    routeLabel: string;
+    stops: GuideStoreRow[];
+  };
+}
+
 /** SBT Shrink record: businesses/{bid}/routes/{rid}/shrinkReports/{weekEnding}.
  *  KEYED BY THE COVERED WEEK read from the document ('Week N, YYYY' /
  *  'Between <start> and <end>'), never the posting week — Flowers posts
