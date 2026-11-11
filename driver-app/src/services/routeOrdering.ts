@@ -1,4 +1,4 @@
-import { Route } from '../types';
+import { BusinessEntity, Route } from '../types';
 
 /**
  * Standing DISPLAY rule (user, 2026-11-07): wherever routes are listed or
@@ -19,12 +19,32 @@ import { Route } from '../types';
 export const ROUTE_DISPLAY_GROUPS: Array<{
   key: 'flowers' | 'cnr-bimbo' | 'lmb-bimbo';
   label: string;
+  entity: BusinessEntity;
   routeNumbers: string[];
 }> = [
-  { key: 'flowers', label: "Mateo's in Motion — Flowers", routeNumbers: ['7823', '13445', '7814'] },
-  { key: 'cnr-bimbo', label: 'CNR Distributors — Bimbo', routeNumbers: ['1510', '2080', '2286', '6286'] },
-  { key: 'lmb-bimbo', label: 'LMB — Bimbo', routeNumbers: ['0721', '1612'] },
+  { key: 'flowers', label: "Mateo's in Motion — Flowers", entity: 'mateos-in-motion', routeNumbers: ['7823', '13445', '7814'] },
+  { key: 'cnr-bimbo', label: 'CNR Distributors — Bimbo', entity: 'cnr', routeNumbers: ['1510', '2080', '2286', '6286'] },
+  { key: 'lmb-bimbo', label: 'LMB — Bimbo', entity: 'lmb', routeNumbers: ['0721', '1612'] },
 ];
+
+const ENTITY_BY_NUMBER = new Map<string, BusinessEntity>();
+ROUTE_DISPLAY_GROUPS.forEach((g) => {
+  g.routeNumbers.forEach((n) => ENTITY_BY_NUMBER.set(n.replace(/^0+(?=\d)/, ''), g.entity));
+});
+
+/**
+ * The business entity operating a route: the stored `businessEntity`
+ * field wins; otherwise derived from the route number via the display
+ * groups (which ARE Chris's entity map). Null when unidentified.
+ */
+export function routeBusinessEntity(
+  route: Pick<Route, 'routeNumber' | 'name' | 'businessEntity'>,
+): BusinessEntity | null {
+  if (route.businessEntity) return route.businessEntity;
+  const raw = route.routeNumber || (route.name || '').match(/\d{3,5}/)?.[0] || '';
+  const digits = String(raw).replace(/\D/g, '').replace(/^0+(?=\d)/, '');
+  return (digits && ENTITY_BY_NUMBER.get(digits)) || null;
+}
 
 /** '0721' and '721' are the same route number. */
 function normalizeRouteNumber(n: string | null | undefined): string {
