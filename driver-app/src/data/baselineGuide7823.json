@@ -160,14 +160,14 @@
     {
       "day": "Thu",
       "off": false,
-      "orderedTotal": 475,
-      "truckTotal": 585,
+      "orderedTotal": 560,
+      "truckTotal": 670,
       "stops": [
         {
           "storeNumber": "0193",
           "storeName": "BJ's #0193",
           "address": "955 Ferry Blvd, Stratford, CT 06614",
-          "pieces": 95,
+          "pieces": 115,
           "loadLabel": "Heavy",
           "inventory": false
         },
@@ -184,7 +184,7 @@
           "storeNumber": "2585",
           "storeName": "Walmart #2585",
           "address": "150 Barnum Ave Cutoff, Stratford, CT 06614",
-          "pieces": 85,
+          "pieces": 105,
           "loadLabel": "Heavy",
           "inventory": false,
           "note": "Shrink watch — 265 units on the last shrink report"
@@ -204,8 +204,8 @@
           "storeNumber": "0639",
           "storeName": "Stop & Shop #0639",
           "address": "200 E Main St, Stratford, CT 06614",
-          "pieces": 150,
-          "loadLabel": "Heavy",
+          "pieces": 195,
+          "loadLabel": "Super Heavy",
           "inventory": false
         },
         {
@@ -222,15 +222,15 @@
     {
       "day": "Fri",
       "off": false,
-      "orderedTotal": 650,
-      "truckTotal": 650,
+      "orderedTotal": 565,
+      "truckTotal": 565,
       "stops": [
         {
           "storeNumber": "0193",
           "storeName": "BJ's #0193",
           "address": "955 Ferry Blvd, Stratford, CT 06614",
-          "pieces": 95,
-          "loadLabel": "Heavy",
+          "pieces": 75,
+          "loadLabel": "Light",
           "inventory": true
         },
         {
@@ -245,8 +245,8 @@
           "storeNumber": "2585",
           "storeName": "Walmart #2585",
           "address": "150 Barnum Ave Cutoff, Stratford, CT 06614",
-          "pieces": 85,
-          "loadLabel": "Heavy",
+          "pieces": 65,
+          "loadLabel": "Light",
           "inventory": false,
           "note": "Shrink watch — 265 units on the last shrink report"
         },
@@ -254,8 +254,8 @@
           "storeNumber": "0639",
           "storeName": "Stop & Shop #0639",
           "address": "200 E Main St, Stratford, CT 06614",
-          "pieces": 150,
-          "loadLabel": "Heavy",
+          "pieces": 105,
+          "loadLabel": null,
           "inventory": false
         },
         {
