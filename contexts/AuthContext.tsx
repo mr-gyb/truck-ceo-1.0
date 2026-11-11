@@ -8,7 +8,7 @@ import {
   GoogleAuthProvider,
   signInWithPopup
 } from 'firebase/auth';
-import { doc, getDoc, getDocs, setDoc, collection, query, updateDoc, increment, arrayUnion, where } from 'firebase/firestore';
+import { doc, getDoc, getDocs, setDoc, collection, query, updateDoc, increment, arrayUnion, where, deleteDoc, deleteField } from 'firebase/firestore';
 import { auth, db } from '../services/firebaseConfig';
 import type { DriverMembership } from '../types';
 
@@ -188,6 +188,43 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         ...routeIds,
       ]),
     ];
+
+    // Atomicity (2026-11-10 join defect fix, mirroring the driver app):
+    // the profile binding (1) and the invite redemption (3) are the
+    // writes that MUST land for the join to count. If either throws, the
+    // profile doc is restored to its pre-join snapshot and the error
+    // propagates, so a failed join leaves no half-applied binding. The
+    // employee step (2) is best-effort inside its own try/catch — the
+    // rules key employee writes on the profile's own businessId, so an
+    // owner-role account joining a route in a business it does not own
+    // is denied there, and that denial must not fail the join (the same
+    // semantics the driver app's join has always had).
+    const restoreProfileSnapshot = async () => {
+      try {
+        if (!existing) {
+          await deleteDoc(doc(db, 'users', user.uid));
+          return;
+        }
+        const snap = (key: keyof UserProfile) =>
+          existing[key] !== undefined ? existing[key] : deleteField();
+        const restore: Record<string, unknown> = {
+          driverMemberships: snap('driverMemberships'),
+        };
+        if (!isOwnerRole) {
+          restore.email = snap('email');
+          restore.displayName = snap('displayName');
+          restore.role = snap('role');
+          restore.businessId = snap('businessId');
+          restore.routeIds = snap('routeIds');
+          restore.employeeId = snap('employeeId');
+        }
+        await setDoc(doc(db, 'users', user.uid), restore, { merge: true });
+      } catch {
+        // Best effort only — the original join error is what surfaces.
+      }
+    };
+
+    try {
     if (isOwnerRole) {
       await setDoc(doc(db, 'users', user.uid), {
         driverMemberships: [...priorMemberships, membership]
@@ -207,11 +244,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     // (2) Employee record under the owner's business so the joiner shows
     // up in the team list and in Driver Invites. One record per user per
     // business: a repeat join unions assignedRoutes onto it instead of
-    // creating a duplicate employee.
+    // creating a duplicate employee. Best-effort (see the atomicity note
+    // above): a rules denial here must not fail the join itself.
+    let employeeId: string | null = null;
+    try {
     const empSnap = await getDocs(
       query(collection(db, `businesses/${invite.businessId}/employees`), where('userId', '==', user.uid))
     );
-    let employeeId: string;
     if (!empSnap.empty) {
       const empDoc = empSnap.docs[0];
       employeeId = empDoc.id;
@@ -240,13 +279,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         createdAt: new Date()
       });
     }
-    if (isOwnerRole) {
-      membership.employeeId = employeeId;
-      await setDoc(doc(db, 'users', user.uid), {
-        driverMemberships: [...priorMemberships, membership]
-      }, { merge: true });
-    } else {
-      await updateDoc(doc(db, 'users', user.uid), { employeeId });
+    if (employeeId) {
+      if (isOwnerRole) {
+        membership.employeeId = employeeId;
+        await setDoc(doc(db, 'users', user.uid), {
+          driverMemberships: [...priorMemberships, membership]
+        }, { merge: true });
+      } else {
+        await updateDoc(doc(db, 'users', user.uid), { employeeId });
+      }
+    }
+    } catch (err) {
+      console.warn('Employee record step failed on join; continuing without it', err);
+      employeeId = null;
     }
 
     // (3) Count + redemption on the global invite doc (owner UI reads here).
@@ -275,6 +320,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch {
       // A driver join cannot write the business-level copy under current
       // rules — the global doc above is the source of truth, so not an error.
+    }
+    } catch (err) {
+      await restoreProfileSnapshot();
+      throw err;
     }
 
     // Clean an invite deep link (/join/{code}) back to the app root.
