@@ -105,12 +105,23 @@ export interface Store {
   storeNumber?: string;
 }
 
+/**
+ * Business entity that operates a route (Chris's structure): Mateo's in
+ * Motion runs the Flowers routes, CNR Distributors the CT Bimbo routes,
+ * LMB the NY Bimbo routes. Routes carry this explicitly so the business
+ * can be loaded with numbered, grouped routes instead of city-name
+ * shells; when unset, services/routeOrdering.ts derives it from the
+ * route number (the standing display groups ARE the entity map).
+ */
+export type BusinessEntity = 'mateos-in-motion' | 'cnr' | 'lmb';
+
 export interface RouteTerritory {
   id: string;
   name: string;
   stores: Store[];
   assignedDriverId?: string | null;
   assignedTruckId?: string | null;
+  businessEntity?: BusinessEntity | null;
   // Optional bakery route number (e.g. "2080"). The assistant matches routes
   // by this first, then by name. Set at creation; editable in Routes management.
   routeNumber?: string;
@@ -213,4 +224,81 @@ export interface RouteUpdate {
   createdAt: any;
   authorName: string;
   authorId: string;
+}
+
+/* ------------------------------------------------------------------ *
+ * Capture-first intake (Chris's spec, 2026-11-10) — mirrors the driver
+ * app's types. One doc per capture at
+ *   businesses/{bid}/routes/{rid}/captures/{captureId}
+ * The source photo/audio in Storage is the provenance for every
+ * extracted value; status 'needs_attention' means unreadable — the
+ * driver retakes it or reports by voice, never a silent guess.
+ * ------------------------------------------------------------------ */
+
+export type CaptureType =
+  | 'depot' | 'stales' | 'shelf' | 'receipt' | 'inventory' | 'transfer' | 'voice' | 'other';
+
+export type CaptureStatus = 'pending' | 'extracted' | 'confirmed' | 'needs_attention';
+
+export interface CaptureExtracted {
+  storeId?: string | null;
+  storeName?: string | null;
+  pieces?: number | null;
+  stalesPulled?: number | null;
+  transferPieces?: number | null;
+  transferDirection?: 'in' | 'out' | null;
+  receiptPieces?: number | null;
+  transcript?: string | null;
+}
+
+export interface DriverCapture {
+  id?: string;
+  type: CaptureType;
+  date: string; // yyyy-mm-dd
+  storagePath: string;
+  downloadUrl?: string | null;
+  storeId?: string | null;
+  storeName?: string | null;
+  status: CaptureStatus;
+  extracted?: CaptureExtracted | null;
+  attentionNote?: string | null;
+  driverId: string;
+  driverName: string;
+  createdAt?: any;
+}
+
+/* ------------------------------------------------------------------ *
+ * Generated driver guide book + route card (backend-written on
+ * settlement ingest; see functions/src/settlements/guide.ts). Stored
+ * at businesses/{bid}/routes/{rid}/guides/{weekEnding}. Built only
+ * from the settlement's store rows + the route's store registry.
+ * ------------------------------------------------------------------ */
+
+export interface GuideStoreRow {
+  storeNumber: string;
+  storeName: string;
+  address?: string | null;
+  sequence?: number | null;
+  pieces?: number | null;
+  sales?: number | null;
+}
+
+export interface RouteGuideData {
+  weekEnding: string;
+  week: number;
+  routeNumber: string;
+  generatedAt: string;
+  sourceSettlementPath: string;
+  guideBook: {
+    routeLabel: string;
+    weekPieces: number | null;
+    weekSales: number | null;
+    stalesPct: number | null;
+    stalesAmount: number | null;
+    stores: GuideStoreRow[];
+  };
+  routeCard: {
+    routeLabel: string;
+    stops: GuideStoreRow[];
+  };
 }
