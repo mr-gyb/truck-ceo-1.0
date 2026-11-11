@@ -10,6 +10,7 @@ import { db } from './firebaseConfig';
 import { resolveMembershipRoutes } from './membershipRoutes';
 import {
   toRoute,
+  type BaselineGuide,
   type DriverMembership,
   type DriverScore,
   type EodReport,
@@ -89,6 +90,35 @@ export async function getLatestRouteGuide(
     return docs[0] ?? null;
   } catch (err) {
     console.warn('Route guide read failed; showing empty state.', err);
+    return null;
+  }
+}
+
+/**
+ * The route's approved baseline guide (Chris's directive, 2026-11-11:
+ * the final guide/card pack lives in the app as the driver's guide).
+ * One doc at routes/{rid}/baselineGuide/current, seeded from the
+ * approved pack — see src/data/baselineGuide7823.ts. Null until a
+ * guide has been loaded for the route: the Today flow then runs on
+ * the registry exactly as before, never a fabricated guide.
+ *
+ * NEVER throws (same contract as the score read): a denied or failed
+ * read degrades to "no guide", not a hung or blank Today tab.
+ */
+export async function getBaselineGuide(
+  businessId: string,
+  routeId: string,
+): Promise<BaselineGuide | null> {
+  if (!db) return null;
+  try {
+    const snap = await getDoc(
+      doc(db, 'businesses', businessId, 'routes', routeId, 'baselineGuide', 'current'),
+    );
+    if (!snap.exists()) return null;
+    const data = snap.data() as BaselineGuide;
+    return data && data.kind === 'baseline' && Array.isArray(data.days) ? data : null;
+  } catch (err) {
+    console.warn('Baseline guide read failed; running without a guide.', err);
     return null;
   }
 }
