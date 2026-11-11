@@ -1,8 +1,9 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { useAuth } from './AuthContext';
-import { getAssignedRoutes, getEodReport } from '../services/driverService';
+import { getEodReport, getMembershipRoutes } from '../services/driverService';
+import { listCapturesForDay } from '../services/captureService';
 import { sortRoutesForDisplay } from '../services/routeOrdering';
-import type { EodReport, Route, StopVisit } from '../types';
+import type { DriverCapture, EodReport, Route, StopVisit } from '../types';
 
 export const todayId = () => {
   const d = new Date();
@@ -31,6 +32,9 @@ interface DriverDayContextType {
   updateVisit: (stopId: string, patch: Partial<StopVisit>) => void;
   eod: EodReport | null;
   setEod: (eod: EodReport | null) => void;
+  /** Today's captures on the active route (capture-first intake). */
+  captures: DriverCapture[];
+  refreshCaptures: () => Promise<void>;
   refresh: () => Promise<void>;
 }
 
@@ -51,6 +55,7 @@ export const DriverDayProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [piecesLoaded, setPiecesLoaded] = useState<number | null>(null);
   const [visits, setVisits] = useState<Record<string, StopVisit>>({});
   const [eod, setEod] = useState<EodReport | null>(null);
+  const [captures, setCaptures] = useState<DriverCapture[]>([]);
 
   const refresh = async () => {
     if (!profile) {
@@ -60,9 +65,8 @@ export const DriverDayProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     }
     setLoading(true);
     try {
-      const fetched = sortRoutesForDisplay(
-        await getAssignedRoutes(profile.businessId, profile.routeIds),
-      );
+      // Multi-route: every membership's route, each from its own business.
+      const fetched = sortRoutesForDisplay(await getMembershipRoutes(profile));
       setRoutes(fetched);
       setActiveRouteId((prev) =>
         prev && fetched.some((r) => r.id === prev) ? prev : (fetched[0]?.id ?? null),
@@ -82,15 +86,20 @@ export const DriverDayProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     [routes, activeRouteId],
   );
 
+  // The business every route-scoped read/write targets: the ROUTE's own
+  // business (memberships can span businesses), falling back to the
+  // profile's primary business.
+  const routeBusinessId = route?.businessId ?? profile?.businessId ?? null;
+
   // Load today's submitted EOD (if any) whenever the active route changes.
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      if (!profile || !route) {
+      if (!routeBusinessId || !route) {
         setEod(null);
         return;
       }
-      const existing = await getEodReport(profile.businessId, route.id, todayId()).catch(
+      const existing = await getEodReport(routeBusinessId, route.id, todayId()).catch(
         () => null,
       );
       if (!cancelled) setEod(existing);
@@ -98,7 +107,22 @@ export const DriverDayProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     return () => {
       cancelled = true;
     };
-  }, [profile?.businessId, route?.id]);
+  }, [routeBusinessId, route?.id]);
+
+  const refreshCaptures = async () => {
+    if (!routeBusinessId || !route) {
+      setCaptures([]);
+      return;
+    }
+    const list = await listCapturesForDay(routeBusinessId, route.id, todayId()).catch(() => []);
+    setCaptures(list);
+  };
+
+  // Captures are scoped to the active route + today; reload on switch.
+  useEffect(() => {
+    void refreshCaptures();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeBusinessId, route?.id]);
 
   const updateVisit = (stopId: string, patch: Partial<StopVisit>) => {
     if (!route) return;
@@ -135,6 +159,8 @@ export const DriverDayProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     updateVisit,
     eod,
     setEod,
+    captures,
+    refreshCaptures,
     refresh,
   };
 
