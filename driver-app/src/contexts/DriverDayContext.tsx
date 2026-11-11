@@ -1,9 +1,18 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { useAuth } from './AuthContext';
-import { getEodReport, getMembershipRoutes } from '../services/driverService';
+import { getBaselineGuide, getEodReport, getMembershipRoutes } from '../services/driverService';
 import { listCapturesForDay, startMediaHousekeeping } from '../services/captureService';
 import { sortRoutesForDisplay } from '../services/routeOrdering';
-import type { DriverCapture, EodReport, Route, StopVisit } from '../types';
+import { applyGuideToStops } from '../services/baselineGuide';
+import type {
+  BaselineGuide,
+  BaselineGuideDay,
+  DriverCapture,
+  EodReport,
+  Route,
+  Stop,
+  StopVisit,
+} from '../types';
 
 export const todayId = () => {
   const d = new Date();
@@ -36,6 +45,17 @@ interface DriverDayContextType {
   captures: DriverCapture[];
   refreshCaptures: () => Promise<void>;
   refresh: () => Promise<void>;
+  /** The active route's approved baseline guide, when one is loaded
+   *  (routes/{rid}/baselineGuide/current). Null = no guide in the app
+   *  for this route yet; the day then runs on the registry as before. */
+  guide: BaselineGuide | null;
+  /** Today's entry from the guide (null when there is no guide). */
+  guideDay: BaselineGuideDay | null;
+  /** The stops to run today: today's guide day merged onto the route's
+   *  registry stops when a guide exists (guide run order + guide
+   *  quantities), otherwise the route's stops untouched. Empty on a
+   *  guide off day. */
+  todayStops: Stop[];
 }
 
 const DriverDayContext = createContext<DriverDayContextType | undefined>(undefined);
@@ -56,6 +76,7 @@ export const DriverDayProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [visits, setVisits] = useState<Record<string, StopVisit>>({});
   const [eod, setEod] = useState<EodReport | null>(null);
   const [captures, setCaptures] = useState<DriverCapture[]>([]);
+  const [guide, setGuide] = useState<BaselineGuide | null>(null);
 
   const refresh = async () => {
     if (!profile) {
@@ -113,6 +134,31 @@ export const DriverDayProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       cancelled = true;
     };
   }, [routeBusinessId, route?.id]);
+
+  // Load the active route's baseline guide (if one has been loaded
+  // into the app for it) whenever the active route changes.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!routeBusinessId || !route) {
+        setGuide(null);
+        return;
+      }
+      const loaded = await getBaselineGuide(routeBusinessId, route.id).catch(() => null);
+      if (!cancelled) setGuide(loaded);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [routeBusinessId, route?.id]);
+
+  // Today's run: the guide day merged onto the registry when a guide
+  // exists for this route; the registry untouched when it does not.
+  const { stops: todayStops, day: guideDay } = useMemo(() => {
+    if (!route) return { stops: [] as Stop[], day: null as BaselineGuideDay | null };
+    return applyGuideToStops(route, guide, new Date());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [route?.id, route?.stops, guide]);
 
   const refreshCaptures = async () => {
     if (!routeBusinessId || !route) {
@@ -176,6 +222,9 @@ export const DriverDayProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     captures,
     refreshCaptures,
     refresh,
+    guide,
+    guideDay,
+    todayStops,
   };
 
   return <DriverDayContext.Provider value={value}>{children}</DriverDayContext.Provider>;
