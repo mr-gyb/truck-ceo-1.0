@@ -15,10 +15,11 @@ const TABS: Array<{ id: Tab; label: string; icon: string }> = [
 export const AppShell: React.FC<{
   tab: Tab;
   onTab: (t: Tab) => void;
+  onJoinRoute: () => void;
   children: React.ReactNode;
-}> = ({ tab, onTab, children }) => {
+}> = ({ tab, onTab, onJoinRoute, children }) => {
   const { profile, logout } = useAuth();
-  const { route } = useDriverDay();
+  const { route, routes, setActiveRouteId } = useDriverDay();
 
   return (
     <div className="mx-auto flex min-h-screen w-full max-w-md flex-col bg-slate-50">
@@ -32,14 +33,38 @@ export const AppShell: React.FC<{
               {route ? `Route ${route.routeNumber ?? route.name}` : 'No route yet'}
             </h1>
           </div>
-          <button
-            type="button"
-            onClick={() => void logout()}
-            className="rounded-lg border border-slate-700 px-3 py-2 text-xs font-semibold text-slate-200"
-          >
-            <i className="fa-solid fa-right-from-bracket mr-1" /> Sign out
-          </button>
+          <div className="flex shrink-0 gap-2">
+            <button
+              type="button"
+              onClick={onJoinRoute}
+              title="Join another route with an invite code"
+              className="rounded-lg border border-slate-700 px-3 py-2 text-xs font-semibold text-slate-200"
+            >
+              <i className="fa-solid fa-ticket mr-1" /> Add route
+            </button>
+            <button
+              type="button"
+              onClick={() => void logout()}
+              className="rounded-lg border border-slate-700 px-3 py-2 text-xs font-semibold text-slate-200"
+            >
+              <i className="fa-solid fa-right-from-bracket mr-1" /> Sign out
+            </button>
+          </div>
         </div>
+        {routes.length > 1 && route && (
+          <select
+            aria-label="Switch route"
+            value={route.id}
+            onChange={(e) => setActiveRouteId(e.target.value)}
+            className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm font-semibold text-white"
+          >
+            {routes.map((r) => (
+              <option key={r.id} value={r.id}>
+                Route {r.routeNumber ?? r.name} — {r.name}
+              </option>
+            ))}
+          </select>
+        )}
         {profile && (
           <p className="mt-1 text-xs text-slate-400">
             {profile.displayName} · {new Date().toLocaleDateString(undefined, {
