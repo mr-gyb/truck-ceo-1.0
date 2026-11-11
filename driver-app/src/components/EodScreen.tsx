@@ -2,7 +2,12 @@ import React, { useMemo, useRef, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { todayId, useDriverDay } from '../contexts/DriverDayContext';
 import { submitEodReport } from '../services/driverService';
-import { createCapture } from '../services/captureService';
+import { submitCapture } from '../services/captureService';
+import {
+  RECORDER_AUDIO_BITS_PER_SECOND,
+  RECORDER_MAX_SECONDS,
+  selectRecorderMime,
+} from '../services/mediaPipeline';
 import { deriveEodDraft, type DerivedField } from '../services/eodDerivation';
 import type { EodReport } from '../types';
 
@@ -73,15 +78,29 @@ const FieldRow: React.FC<{
   </div>
 );
 
-/** Voice-note recorder for the outlook (and voice fallback reports). */
+/** Voice-note recorder for the outlook (and voice fallback reports).
+ * Lean by design: the leanest speech mime the platform offers at
+ * 32 kbps (≈240 KB for a full note), hard-capped at 60 seconds with a
+ * countdown and auto-stop. The recording lives only in memory; the
+ * chunks are dropped the moment the note is built, and a failed send
+ * is staged on-phone for automatic retry like any capture. */
 const VoiceNoteButton: React.FC<{ onSaved: () => Promise<void> }> = ({ onSaved }) => {
   const { profile, currentUser } = useAuth();
   const { route } = useDriverDay();
   const [recording, setRecording] = useState(false);
+  const [secondsLeft, setSecondsLeft] = useState(RECORDER_MAX_SECONDS);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const timerRef = useRef<number | null>(null);
+
+  const clearTimer = () => {
+    if (timerRef.current !== null) {
+      window.clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+  };
 
   const toggle = async () => {
     if (recording) {
@@ -95,19 +114,32 @@ const VoiceNoteButton: React.FC<{ onSaved: () => Promise<void> }> = ({ onSaved }
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
+      const mime = selectRecorderMime((m) => MediaRecorder.isTypeSupported(m));
+      const recorder = new MediaRecorder(
+        stream,
+        mime
+          ? { mimeType: mime, audioBitsPerSecond: RECORDER_AUDIO_BITS_PER_SECOND }
+          : { audioBitsPerSecond: RECORDER_AUDIO_BITS_PER_SECOND },
+      );
       chunksRef.current = [];
       recorder.ondataavailable = (e) => {
         if (e.data.size > 0) chunksRef.current.push(e.data);
       };
       recorder.onstop = async () => {
+        clearTimer();
         stream.getTracks().forEach((t) => t.stop());
         setRecording(false);
-        if (!profile || !route || !currentUser) return;
+        if (!profile || !route || !currentUser) {
+          chunksRef.current = [];
+          return;
+        }
         setBusy(true);
         try {
           const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' });
-          await createCapture({
+          // In-memory copy ends here: the blob is handed to the upload
+          // (and, only on failure, to the on-phone retry outbox).
+          chunksRef.current = [];
+          await submitCapture({
             businessId: route.businessId ?? profile.businessId,
             routeId: route.id,
             date: todayId(),
@@ -119,7 +151,7 @@ const VoiceNoteButton: React.FC<{ onSaved: () => Promise<void> }> = ({ onSaved }
           });
           await onSaved();
         } catch {
-          setError('That voice note did not upload. Check your connection and try again.');
+          setError('No signal — that voice note is saved on this phone and will send itself when signal returns.');
         } finally {
           setBusy(false);
         }
@@ -127,6 +159,16 @@ const VoiceNoteButton: React.FC<{ onSaved: () => Promise<void> }> = ({ onSaved }
       recorderRef.current = recorder;
       recorder.start();
       setRecording(true);
+      setSecondsLeft(RECORDER_MAX_SECONDS);
+      timerRef.current = window.setInterval(() => {
+        setSecondsLeft((s) => {
+          if (s <= 1) {
+            recorderRef.current?.stop();
+            return 0;
+          }
+          return s - 1;
+        });
+      }, 1000);
     } catch {
       setError('Microphone access was blocked. Allow the microphone to record a voice note.');
     }
@@ -143,7 +185,11 @@ const VoiceNoteButton: React.FC<{ onSaved: () => Promise<void> }> = ({ onSaved }
         }`}
       >
         <i className={`fa-solid ${busy ? 'fa-spinner fa-spin' : recording ? 'fa-stop' : 'fa-microphone'}`} />
-        {busy ? 'Sending…' : recording ? 'Stop and send voice note' : 'Record tomorrow’s outlook'}
+        {busy
+          ? 'Sending…'
+          : recording
+            ? `Stop and send voice note · 0:${String(secondsLeft).padStart(2, '0')} left`
+            : 'Record tomorrow’s outlook'}
       </button>
       {error && <p className="mt-2 text-sm font-medium text-red-700">{error}</p>}
     </div>
