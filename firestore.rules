@@ -1,20 +1,20 @@
-// Firestore + Storage security rules for the TruckCEO role model
-// ------------------------------------------------------------------
-// These are NOT auto-deployed (firebase.json only deploys hosting).
-// Apply them in the Firebase console: Firestore Database > Rules
-// (and Storage > Rules for the second block), then Publish.
-//
-// Model:
-//   users/{uid}                -> { role: 'business_owner' | 'team_member', businessId, employeeId?, routeIds? }
-//   inviteCodes/{CODE}         -> global lookup for driver join (readable by any authed user)
-//   businesses/{bid}/...      -> everything under a business is tenant-isolated
-//   businesses/{bid}/routes/{rid}/eod|photos|updates -> driver-submitted data
-//
-// 2026-09-30: Replaced the recursive /{subcollection=**} wildcard with
-// explicit per-collection matches. The wildcard's list (query) evaluation
-// was denying reads ("Missing or insufficient permissions") while single-doc
-// gets on the same paths were allowed. Explicit matches keep identical
-// tenant-isolation semantics with predictable list behavior.
+# Firestore + Storage security rules for the TruckCEO role model
+# ------------------------------------------------------------------
+# These are NOT auto-deployed (firebase.json only deploys hosting).
+# Apply them in the Firebase console: Firestore Database > Rules
+# (and Storage > Rules for the second block), then Publish.
+#
+# Model:
+#   users/{uid}                -> { role: 'business_owner' | 'team_member', businessId, employeeId?, routeIds? }
+#   inviteCodes/{CODE}         -> global lookup for driver join (readable by any authed user)
+#   businesses/{bid}/...      -> everything under a business is tenant-isolated
+#   businesses/{bid}/routes/{rid}/eod|photos|updates -> driver-submitted data
+#
+# 2026-09-30: Replaced the recursive /{subcollection=**} wildcard with
+# explicit per-collection matches. The wildcard's list (query) evaluation
+# was denying reads ("Missing or insufficient permissions") while single-doc
+# gets on the same paths were allowed. Explicit matches keep identical
+# tenant-isolation semantics with predictable list behavior.
 
 rules_version = '2';
 service cloud.firestore {
@@ -160,6 +160,22 @@ service cloud.firestore {
         }
         // Discord daily activity: grain is route-DAY (doc id = yyyy-mm-dd).
         match /activity/{date} {
+          allow read: if isMyBusiness(bid);
+          allow write: if isMyBusiness(bid) && myProfile().role == 'business_owner';
+        }
+        // Capture-first intake (2026-11-10): one doc per photo/voice
+        // capture at routes/{rid}/captures/{captureId}. Written by the
+        // driver who shot it; the backend reader (Admin SDK) fills the
+        // extracted values. Tenant isolation is the business check, same
+        // as eod/photos above.
+        match /captures/{captureId} {
+          allow read, write: if isMyBusiness(bid);
+        }
+        // Generated driver guide book + route card (2026-11-10): written
+        // by the settlement ingest backend (Admin SDK) when a settlement
+        // lands for the route. Members read; only owners write from a
+        // client (manual repair path), mirroring settlements.
+        match /guides/{weekEnding} {
           allow read: if isMyBusiness(bid);
           allow write: if isMyBusiness(bid) && myProfile().role == 'business_owner';
         }
