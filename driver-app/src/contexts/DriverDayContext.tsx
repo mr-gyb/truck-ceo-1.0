@@ -71,6 +71,11 @@ export const DriverDayProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       setActiveRouteId((prev) =>
         prev && fetched.some((r) => r.id === prev) ? prev : (fetched[0]?.id ?? null),
       );
+    } catch (err) {
+      // A failed route load must never blank the driver's day or surface
+      // upstream as a failed join (the join panel awaits refresh): keep
+      // the routes already on screen and stay on the current route.
+      console.warn('Route refresh failed; keeping the routes already shown.', err);
     } finally {
       setLoading(false);
     }
