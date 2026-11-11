@@ -10,7 +10,7 @@ import {
   signOut,
   type User,
 } from 'firebase/auth';
-import { arrayUnion, collection, doc, getDoc, increment, setDoc, updateDoc } from 'firebase/firestore';
+import { arrayUnion, collection, doc, getDoc, getDocs, increment, query, setDoc, updateDoc, where } from 'firebase/firestore';
 import { auth, db, firebaseConfigured } from '../services/firebaseConfig';
 import { lookupInviteCode } from '../services/driverService';
 import type { DriverMembership, DriverProfile } from '../types';
@@ -25,23 +25,34 @@ import type { DriverMembership, DriverProfile } from '../types';
 function resolveDriverProfile(data: Record<string, unknown>): DriverProfile | null {
   const memberships = (data.driverMemberships as DriverMembership[] | undefined) ?? [];
   if (data.role === 'team_member') {
+    const businessId = data.businessId as string;
+    // Multi-route (2026-11-10): the profile's routes are the stored
+    // routeIds UNION every membership in this business — a driver holds
+    // every route they were invited to, not just the last one joined.
+    const routeIds = new Set<string>((data.routeIds as string[]) ?? []);
+    for (const m of memberships) {
+      if (m.businessId === businessId) routeIds.add(m.routeId);
+    }
     return {
       email: (data.email as string) ?? '',
       displayName: (data.displayName as string) ?? 'Driver',
       role: 'team_member',
-      businessId: data.businessId as string,
-      routeIds: (data.routeIds as string[]) ?? [],
+      businessId,
+      routeIds: [...routeIds],
       driverMemberships: memberships,
     };
   }
   const m = memberships[0];
   if (m) {
+    // Dual-role account: ALL memberships ride along (the day context
+    // fetches each route from its own business); routeIds lists the
+    // primary business's memberships for legacy readers.
     return {
       email: (data.email as string) ?? '',
       displayName: (data.displayName as string) ?? 'Driver',
       role: 'team_member',
       businessId: m.businessId,
-      routeIds: [m.routeId],
+      routeIds: memberships.filter((x) => x.businessId === m.businessId).map((x) => x.routeId),
       driverMemberships: memberships,
     };
   }
@@ -177,6 +188,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
 
     // (1) Profile first, merged, owner roles preserved.
+    // Multi-route (2026-11-10): redeeming a code ADDS the route to the
+    // driver's memberships and routeIds — it never replaces them. (The
+    // old write set routeIds to just the new route and dropped the rest
+    // of the profile, which is why a driver could only ever hold one
+    // route and saw no way to join another.)
     const userRef = doc(db, 'users', currentUser.uid);
     const existingSnap = await getDoc(userRef);
     const existing = (existingSnap.exists() ? (existingSnap.data() as Record<string, unknown>) : null);
@@ -191,17 +207,25 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       (m) => !(m.businessId === invite.businessId && m.routeId === invite.routeId),
     );
     const memberships = [...priorMemberships, membership];
+    const sameBusiness = !existing?.businessId || existing.businessId === invite.businessId;
+    const routeIds = sameBusiness
+      ? [...new Set([...((existing?.routeIds as string[] | undefined) ?? []), invite.routeId])]
+      : ((existing?.routeIds as string[] | undefined) ?? []);
     if (isOwnerRole) {
       await setDoc(userRef, { driverMemberships: memberships }, { merge: true });
     } else {
-      await setDoc(userRef, {
-        email: currentUser.email ?? '',
-        displayName: name,
-        role: 'team_member',
-        businessId: invite.businessId,
-        routeIds: [invite.routeId],
-        driverMemberships: memberships,
-      });
+      await setDoc(
+        userRef,
+        {
+          email: currentUser.email ?? '',
+          displayName: name,
+          role: 'team_member',
+          businessId: invite.businessId,
+          routeIds,
+          driverMemberships: memberships,
+        },
+        { merge: true },
+      );
     }
 
     // (2) Count + redemption on the global invite doc (owner UI reads here).
@@ -220,26 +244,53 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     // (3) Employee record so the owner sees this driver on the team list.
+    // One record per driver per business: a second join ADDS the route to
+    // assignedRoutes instead of creating a duplicate employee.
     try {
-      const empRef = doc(collection(db, 'businesses', invite.businessId, 'employees'));
-      await setDoc(empRef, {
-        name,
-        role: 'driver',
-        userId: currentUser.uid,
-        email: currentUser.email || null,
-        assignedRoutes: [invite.routeId],
-        status: 'active',
-        hoursThisWeek: 0,
-        engagementScore: 0,
-        salesHistory: [],
-        attendance: [],
-        vacationDaysUsed: 0,
-        sickDaysUsed: 0,
-        inviteCode: invite.code,
-        createdAt: new Date(),
-      });
-      if (!isOwnerRole) {
-        await updateDoc(userRef, { employeeId: empRef.id });
+      const empQuery = query(
+        collection(db, 'businesses', invite.businessId, 'employees'),
+        where('userId', '==', currentUser.uid),
+      );
+      const empSnap = await getDocs(empQuery);
+      if (!empSnap.empty) {
+        const empDoc = empSnap.docs[0];
+        const assigned = new Set<string>(
+          (empDoc.data().assignedRoutes as string[] | undefined) ?? [],
+        );
+        assigned.add(invite.routeId);
+        await updateDoc(empDoc.ref, { assignedRoutes: [...assigned] });
+        const existingMembership = memberships.find(
+          (m) => m.businessId === invite.businessId && m.routeId === invite.routeId,
+        );
+        if (existingMembership) existingMembership.employeeId = empDoc.id;
+        membership.employeeId = empDoc.id;
+        if (!isOwnerRole) {
+          await setDoc(userRef, { employeeId: empDoc.id, driverMemberships: memberships }, { merge: true });
+        }
+      } else {
+        const empRef = doc(collection(db, 'businesses', invite.businessId, 'employees'));
+        await setDoc(empRef, {
+          name,
+          role: 'driver',
+          userId: currentUser.uid,
+          email: currentUser.email || null,
+          assignedRoutes: [invite.routeId],
+          status: 'active',
+          hoursThisWeek: 0,
+          engagementScore: 0,
+          salesHistory: [],
+          attendance: [],
+          vacationDaysUsed: 0,
+          sickDaysUsed: 0,
+          inviteCode: invite.code,
+          createdAt: new Date(),
+        });
+        membership.employeeId = empRef.id;
+        if (!isOwnerRole) {
+          await setDoc(userRef, { employeeId: empRef.id, driverMemberships: memberships }, { merge: true });
+        } else {
+          await setDoc(userRef, { driverMemberships: memberships }, { merge: true });
+        }
       }
     } catch (err) {
       // A rules denial here must not fail the join itself — the profile and
@@ -252,7 +303,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       displayName: name,
       role: 'team_member',
       businessId: invite.businessId,
-      routeIds: [invite.routeId],
+      routeIds: isOwnerRole
+        ? memberships.filter((m) => m.businessId === invite.businessId).map((m) => m.routeId)
+        : routeIds,
       driverMemberships: memberships,
     });
   };
