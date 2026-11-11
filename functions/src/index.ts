@@ -1,5 +1,4 @@
 // Node.js 22 runtime — upgraded 2026-10-12. This comment forces a functions redeploy so the firebase.json runtime change (nodejs20 -> nodejs22) takes effect; firebase-tools skips redeploys when function code is unchanged.
-// redeploy 2026-11-09: force functions redeploy after IAM grant (no behavior change)
 /**
  * TruckCEO in-app AI assistant — askAssistant (Gemini-primary, provider abstraction)
  *
@@ -2152,3 +2151,12 @@ export { reprocessSettlement, ingestSettlementPdf } from "./settlements/ingest";
 // bisect the ingest callables' bare functions/internal failure. Remove
 // once the ingest pipeline is verified live.
 export { ingestPing } from "./ingestPing";
+// Capture-extraction reader (2026-11-10): the driver app calls
+// processCapture right after a capture uploads; it reads the photo /
+// voice note (Gemini) and writes validated values back to the capture
+// doc (extracted / needs_attention / stays pending on reader error).
+// The Firestore trigger twin (onCaptureCreated in the same module) is
+// deliberately NOT exported yet — trigger deploys through the Actions
+// credential are unproven here (see the Plan B note above); the
+// callable is the production path.
+export { processCapture } from "./captures/processCapture";
