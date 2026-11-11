@@ -14,4 +14,25 @@ export default defineConfig({
     host: '0.0.0.0',
   },
   plugins: [react()],
+  build: {
+    rollupOptions: {
+      output: {
+        // Firebase ships in its own fingerprinted chunk: it changes far
+        // less often than app code, and the server gives .js a 1-year
+        // cache header — so an app deploy no longer forces drivers to
+        // re-download ~1 MB of Firebase on a depot connection.
+        manualChunks: (id) => {
+          if (
+            id.includes('node_modules/firebase') ||
+            id.includes('node_modules/@firebase') ||
+            id.includes('node_modules/@grpc') ||
+            id.includes('node_modules/protobufjs')
+          ) {
+            return 'vendor-firebase';
+          }
+          return undefined;
+        },
+      },
+    },
+  },
 });
