@@ -45,7 +45,8 @@ import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import * as logger from 'firebase-functions/logger';
 import * as admin from 'firebase-admin';
 import type { FlowersParseOutput } from './index';
-import type { IngestionRegistryEntry } from './types';
+import type { IngestionRegistryEntry, SettlementRecord } from './types';
+import { buildRouteGuide, type RouteRegistryForGuide } from './guide';
 
 /**
  * Lazy parser stack (bisect build, 2026-11-07): the deployed
@@ -194,6 +195,36 @@ async function resolveRouteDocId(businessId: string, routeNumber: string): Promi
     logger.warn('ingest: route resolution read failed', { businessId, routeNumber, e });
   }
   return null;
+}
+
+/**
+ * (Re)generate routes/{rid}/guides/{weekEnding} from the route's
+ * settlement record for that week + the route doc's store registry.
+ * No settlement record yet (e.g. margin detail arrived first) = no
+ * guide yet: the guide is generated FROM the settlement, and the
+ * statement's own ingest — or its margin merge — will call this again.
+ */
+async function regenerateRouteGuide(
+  businessId: string,
+  routeDocId: string,
+  weekEnding: string,
+): Promise<void> {
+  const routeRef = db().doc(`businesses/${businessId}/routes/${routeDocId}`);
+  const settleRef = routeRef.collection('settlements').doc(weekEnding);
+  const [routeSnap, settleSnap] = await Promise.all([routeRef.get(), settleRef.get()]);
+  if (!settleSnap.exists) return;
+  const settlement = settleSnap.data() as SettlementRecord;
+  const route = (routeSnap.exists ? routeSnap.data() : {}) as RouteRegistryForGuide;
+  const guide = buildRouteGuide({
+    route,
+    settlement,
+    sourceSettlementPath: settleRef.path,
+    generatedAt: new Date().toISOString(),
+  });
+  await routeRef
+    .collection('guides')
+    .doc(weekEnding)
+    .set(sanitizeForFirestore(guide), { merge: true });
 }
 
 /** Queue an ingest exception to the existing GYBs pickup surfaces. */
@@ -353,6 +384,33 @@ async function ingestSettlementBytesInner(
         }),
         { merge: true },
       );
+    }
+  }
+
+  // Guide generation (Chris's directive, 2026-11-10): a landed
+  // settlement (re)generates the route's driver guide book + route card
+  // at routes/{rid}/guides/{weekEnding}, from the settlement's store
+  // rows + the route's store registry. Runs AFTER the margin merge so
+  // the guide sees the merged store rows. Best-effort by design: a
+  // guide failure is logged and never fails the ingest itself — the
+  // settlement record is the deliverable; the guide regenerates on the
+  // next ingest for that route-week.
+  if (
+    routeDocId &&
+    (output.docType === 'flowers_master_statement' ||
+      output.docType === 'flowers_distributor_statement' ||
+      output.docType === 'flowers_margin_detail')
+  ) {
+    stage = 'guide';
+    try {
+      await regenerateRouteGuide(businessId, routeDocId, weekEnding);
+    } catch (e) {
+      logger.warn('ingest: guide generation failed (settlement still landed)', {
+        businessId,
+        routeDocId,
+        weekEnding,
+        message: e instanceof Error ? e.message : String(e),
+      });
     }
   }
 
