@@ -34,6 +34,24 @@ export interface Stop extends Store {
    * Days this stop is served, e.g. ['Mon','Wed','Fri']. Null = unconfirmed.
    */
   deliveryDays: string[] | null;
+  /* --- Baseline-guide enrichment (2026-11-11) -------------------------
+   * Set ONLY by services/baselineGuide.ts when the route carries an
+   * approved baseline guide and this stop is on today's guide day. They
+   * are the guide's numbers for TODAY (pieces + load label), pre-filled
+   * so the driver confirms by capture instead of typing. Absent/null on
+   * every stop when the route has no baseline guide. */
+  /** Guide pieces for this stop today (rounded tracking figures). */
+  guidePieces?: number | null;
+  /** A self-ordering stop's usual volume (~), for truck space only. */
+  guideApproxPieces?: number | null;
+  /** Load weight Chris set for this stop today, e.g. 'Heavy'. */
+  guideLoadLabel?: string | null;
+  /** This stop takes an inventory count today. */
+  guideInventory?: boolean;
+  /** Driver-facing note from the guide, e.g. '6:00–6:30 window'. */
+  guideNote?: string | null;
+  /** The stop orders for itself (Burger King) — no goal figure applies. */
+  guideSelfOrders?: boolean;
 }
 
 /** Business entity operating a route — mirrors the owner app's type. */
@@ -305,4 +323,82 @@ export interface RouteGuideData {
     routeLabel: string;
     stops: GuideStoreRow[];
   };
+}
+
+/* ------------------------------------------------------------------ *
+ * Baseline route guide (Chris's directive, 2026-11-11): the FINAL
+ * approved guide/card pack for a route, loaded into the app as data —
+ *   businesses/{bid}/routes/{rid}/baselineGuide/current
+ * One doc per route: the depot frame, the off days, and for every
+ * delivery day the stops IN RUN ORDER with the day's guide pieces
+ * (rounded tracking figures), load labels, and inventory flags. The
+ * Today flow renders today's guide day as the driver's guide for the
+ * day; quantities are pre-filled from here and confirmed by capture.
+ *
+ * NO MONEY, by the standing Route Runner rule: pieces and stale only.
+ * Guides built from the paper card pack must strip its dollar figures
+ * (revenue, margin, shrink dollars, bonus dollars) before they land
+ * here — shrink may be carried in UNITS only.
+ * ------------------------------------------------------------------ */
+
+export type GuideDayKey = 'Mon' | 'Tue' | 'Wed' | 'Thu' | 'Fri' | 'Sat' | 'Sun';
+
+export interface BaselineGuideStop {
+  /** Supplier store/customer number — the join key to registry stores.
+   *  Null where the store has none on file (C-Town, a cash stop). */
+  storeNumber: string | null;
+  /** Display name as the guide carries it (Family Dollars are labeled
+   *  by street — 'FD Access Rd' — per Chris, 2026-11-11). */
+  storeName: string;
+  address: string;
+  /** Guide pieces for this stop on this day (rounded tracking). Null
+   *  when no goal figure applies — a self-ordering stop (Burger King). */
+  pieces: number | null;
+  /** The stop's usual volume when it sets its own order (BK ~110). An
+   *  expectation for truck space, never a goal the driver is held to. */
+  approxPieces?: number | null;
+  /** Load weight for the day: 'Heavy' | 'Super Heavy' | 'Light' |
+   *  'Super Light' | 'Fix-up' | 'Self-orders'. */
+  loadLabel: string | null;
+  /** Inventory/count stop today (the guide's inventory locks). */
+  inventory: boolean;
+  /** This stop orders for itself; Mateo's only delivers (Burger King). */
+  selfOrders?: boolean;
+  /** Driver-facing note: receiving window, last-stop, watch items. */
+  note?: string | null;
+}
+
+export interface BaselineGuideDay {
+  day: GuideDayKey;
+  /** True on the route's off days (7823: Wed + Sun) — no deliveries. */
+  off: boolean;
+  /** Pieces we order that day (tracking total, guide stops only). */
+  orderedTotal: number | null;
+  /** Total pieces on the truck that day, incl. self-ordered volume. */
+  truckTotal: number | null;
+  /** Today's stops IN RUN ORDER. Empty on off days. */
+  stops: BaselineGuideStop[];
+}
+
+export interface BaselineGuide {
+  kind: 'baseline';
+  routeNumber: string;
+  /** Guide version — the date of the approved pack it was built from. */
+  version: string;
+  /** Where the data came from (the approved guide/card pack). */
+  source: string;
+  depot: {
+    name: string;
+    address: string;
+    /** "HH:mm" 24h depot frame: in by, out by, parked back by. */
+    arriveBy: string;
+    outBy: string;
+    parkedBy: string;
+  };
+  offDays: GuideDayKey[];
+  /** Route goal: total pieces on the truck per week. */
+  weekGoalPieces: number | null;
+  days: BaselineGuideDay[];
+  /** Driver-facing guide notes (pieces/stale only — never money). */
+  notes: string[];
 }
