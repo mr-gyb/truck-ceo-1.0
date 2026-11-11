@@ -10,7 +10,7 @@ import {
   signOut,
   type User,
 } from 'firebase/auth';
-import { arrayUnion, collection, doc, getDoc, getDocs, increment, query, setDoc, updateDoc, where } from 'firebase/firestore';
+import { arrayUnion, collection, deleteDoc, deleteField, doc, getDoc, getDocs, increment, query, setDoc, updateDoc, where } from 'firebase/firestore';
 import { auth, db, firebaseConfigured } from '../services/firebaseConfig';
 import { lookupInviteCode } from '../services/driverService';
 import type { DriverMembership, DriverProfile } from '../types';
@@ -170,6 +170,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
    *     created no employee record, so joins registered nowhere.)
    *  3. The employee record is created under the business so the driver
    *     appears in the owner's team list and Driver Invites screen.
+   * Steps 1–2 are atomic from the driver's perspective: if either write
+   * fails, the profile doc is rolled back to its pre-join snapshot and
+   * the local profile is never switched (see restoreProfileSnapshot).
    * Requires the driver to have created an account first (same as owner app).
    */
   const joinWithInviteCode = async (code: string, displayName: string) => {
@@ -211,28 +214,68 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const routeIds = sameBusiness
       ? [...new Set([...((existing?.routeIds as string[] | undefined) ?? []), invite.routeId])]
       : ((existing?.routeIds as string[] | undefined) ?? []);
-    if (isOwnerRole) {
-      await setDoc(userRef, { driverMemberships: memberships }, { merge: true });
-    } else {
-      await setDoc(
-        userRef,
-        {
-          email: currentUser.email ?? '',
-          displayName: name,
-          role: 'team_member',
-          businessId: invite.businessId,
-          routeIds,
-          driverMemberships: memberships,
-        },
-        { merge: true },
-      );
-    }
 
-    // (2) Count + redemption on the global invite doc (owner UI reads here).
-    await updateDoc(doc(db, 'inviteCodes', invite.code), {
-      usedCount: increment(1),
-      redemptions: arrayUnion(redemption),
-    });
+    // Atomicity (2026-11-10 join defect fix): steps (1) and (2) are the
+    // writes that MUST land for the join to count. If either throws, the
+    // profile doc is restored to its pre-join snapshot and the error
+    // propagates — the local profile (and with it the driver's active
+    // route) is only switched at the very end, after every must-land
+    // write has resolved, so a failed join changes nothing the driver
+    // sees. (Before this fix the binding landed but a later read threw,
+    // and the app flipped to the new route while reporting failure.)
+    const restoreProfileSnapshot = async () => {
+      try {
+        if (!existing) {
+          // The join created this profile doc; a failed join removes it.
+          await deleteDoc(userRef);
+          return;
+        }
+        const snap = (key: string) =>
+          existing[key] !== undefined ? existing[key] : deleteField();
+        const restore: Record<string, unknown> = {
+          driverMemberships: snap('driverMemberships'),
+        };
+        if (!isOwnerRole) {
+          restore.email = snap('email');
+          restore.displayName = snap('displayName');
+          restore.role = snap('role');
+          restore.businessId = snap('businessId');
+          restore.routeIds = snap('routeIds');
+          restore.employeeId = snap('employeeId');
+        }
+        await setDoc(userRef, restore, { merge: true });
+      } catch {
+        // Best effort only — the original join error is what surfaces.
+      }
+    };
+
+    try {
+      if (isOwnerRole) {
+        await setDoc(userRef, { driverMemberships: memberships }, { merge: true });
+      } else {
+        await setDoc(
+          userRef,
+          {
+            email: currentUser.email ?? '',
+            displayName: name,
+            role: 'team_member',
+            businessId: invite.businessId,
+            routeIds,
+            driverMemberships: memberships,
+          },
+          { merge: true },
+        );
+      }
+
+      // (2) Count + redemption on the global invite doc (owner UI reads here).
+      await updateDoc(doc(db, 'inviteCodes', invite.code), {
+        usedCount: increment(1),
+        redemptions: arrayUnion(redemption),
+      });
+    } catch (err) {
+      await restoreProfileSnapshot();
+      throw err;
+    }
     // Business-level copy is owner-write-only in the rules — best effort.
     try {
       await updateDoc(doc(db, 'businesses', invite.businessId, 'invites', invite.code), {
