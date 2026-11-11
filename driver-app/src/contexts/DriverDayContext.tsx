@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { useAuth } from './AuthContext';
 import { getEodReport, getMembershipRoutes } from '../services/driverService';
-import { listCapturesForDay } from '../services/captureService';
+import { listCapturesForDay, startMediaHousekeeping } from '../services/captureService';
 import { sortRoutesForDisplay } from '../services/routeOrdering';
 import type { DriverCapture, EodReport, Route, StopVisit } from '../types';
 
@@ -128,6 +128,15 @@ export const DriverDayProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     void refreshCaptures();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routeBusinessId, route?.id]);
+
+  // Media housekeeping: on start, sweep any staged (failed-upload)
+  // photo copies older than 24h and retry the rest; a sent retry
+  // refreshes the day's captures and its local copy is deleted.
+  useEffect(() => {
+    if (!profile) return;
+    startMediaHousekeeping(() => void refreshCaptures());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile?.businessId]);
 
   const updateVisit = (stopId: string, patch: Partial<StopVisit>) => {
     if (!route) return;
