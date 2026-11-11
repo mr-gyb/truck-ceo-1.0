@@ -7,12 +7,14 @@ import { TodayScreen } from './components/TodayScreen';
 import { StopDetailScreen } from './components/StopDetailScreen';
 import { EodScreen } from './components/EodScreen';
 import { ScoreScreen } from './components/ScoreScreen';
+import { JoinRoutePanel } from './components/JoinRoutePanel';
 import type { Stop } from './types';
 
 const Root: React.FC = () => {
   const { currentUser, profile, loading } = useAuth();
   const [tab, setTab] = useState<Tab>('today');
   const [openStop, setOpenStop] = useState<Stop | null>(null);
+  const [joining, setJoining] = useState(false);
 
   if (loading) {
     return (
@@ -33,12 +35,24 @@ const Root: React.FC = () => {
         onTab={(t) => {
           setTab(t);
           setOpenStop(null);
+          setJoining(false);
+        }}
+        onJoinRoute={() => {
+          setJoining(true);
+          setOpenStop(null);
         }}
       >
-        {openStop ? (
+        {joining ? (
+          <JoinRoutePanel
+            onDone={() => {
+              setJoining(false);
+              setTab('today');
+            }}
+          />
+        ) : openStop ? (
           <StopDetailScreen stop={openStop} onBack={() => setOpenStop(null)} />
         ) : tab === 'today' ? (
-          <TodayScreen onOpenStop={setOpenStop} />
+          <TodayScreen onOpenStop={setOpenStop} onGoEod={() => setTab('eod')} />
         ) : tab === 'eod' ? (
           <EodScreen />
         ) : (
