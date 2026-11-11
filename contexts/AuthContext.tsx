@@ -8,7 +8,7 @@ import {
   GoogleAuthProvider,
   signInWithPopup
 } from 'firebase/auth';
-import { doc, getDoc, setDoc, collection, updateDoc, increment, arrayUnion } from 'firebase/firestore';
+import { doc, getDoc, getDocs, setDoc, collection, query, updateDoc, increment, arrayUnion, where } from 'firebase/firestore';
 import { auth, db } from '../services/firebaseConfig';
 import type { DriverMembership } from '../types';
 
@@ -159,6 +159,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     // 'business_manager' (business view). Legacy per-route codes have no role
     // field and default to the driver view.
     const accountRole = invite.role === 'business_manager' ? 'business_manager' : 'team_member';
+    // Multi-route (2026-11-10): a join ADDS the invite's route to the
+    // account's routes — it never replaces the ones already held. The
+    // existing profile is read below (priorMemberships) before this is
+    // finalized; routeIds starts as the invite's contribution.
     const routeIds = invite.routeId ? [invite.routeId] : [];
     const displayName = pendingName || user.displayName || user.email || (accountRole === 'business_manager' ? 'Partner' : 'Driver');
 
@@ -176,6 +180,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const priorMemberships = (existing?.driverMemberships || []).filter(
       (m) => !(m.businessId === invite.businessId && m.routeId === invite.routeId)
     );
+    // Union with the routes the account already holds in THIS business
+    // (memberships in other businesses ride in driverMemberships only).
+    const allRouteIds = [
+      ...new Set([
+        ...((existing?.businessId === invite.businessId ? existing?.routeIds : undefined) || []),
+        ...routeIds,
+      ]),
+    ];
     if (isOwnerRole) {
       await setDoc(doc(db, 'users', user.uid), {
         driverMemberships: [...priorMemberships, membership]
@@ -186,38 +198,55 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         displayName,
         role: accountRole,
         businessId: invite.businessId,
-        routeIds,
+        routeIds: allRouteIds,
         driverMemberships: [...priorMemberships, membership],
         createdAt: new Date()
-      });
+      }, { merge: true });
     }
 
     // (2) Employee record under the owner's business so the joiner shows
-    // up in the team list and in Driver Invites.
-    const empRef = doc(collection(db, `businesses/${invite.businessId}/employees`));
-    await setDoc(empRef, {
-      name: displayName,
-      role: accountRole === 'business_manager' ? 'manager' : 'driver',
-      userId: user.uid,
-      email: user.email || null,
-      assignedRoutes: routeIds,
-      status: 'active',
-      hoursThisWeek: 0,
-      engagementScore: 0,
-      salesHistory: [],
-      attendance: [],
-      vacationDaysUsed: 0,
-      sickDaysUsed: 0,
-      inviteCode: code,
-      createdAt: new Date()
-    });
+    // up in the team list and in Driver Invites. One record per user per
+    // business: a repeat join unions assignedRoutes onto it instead of
+    // creating a duplicate employee.
+    const empSnap = await getDocs(
+      query(collection(db, `businesses/${invite.businessId}/employees`), where('userId', '==', user.uid))
+    );
+    let employeeId: string;
+    if (!empSnap.empty) {
+      const empDoc = empSnap.docs[0];
+      employeeId = empDoc.id;
+      const assigned = new Set<string>([
+        ...((empDoc.data().assignedRoutes as string[] | undefined) || []),
+        ...routeIds,
+      ]);
+      await updateDoc(empDoc.ref, { assignedRoutes: [...assigned] });
+    } else {
+      const empRef = doc(collection(db, `businesses/${invite.businessId}/employees`));
+      employeeId = empRef.id;
+      await setDoc(empRef, {
+        name: displayName,
+        role: accountRole === 'business_manager' ? 'manager' : 'driver',
+        userId: user.uid,
+        email: user.email || null,
+        assignedRoutes: routeIds,
+        status: 'active',
+        hoursThisWeek: 0,
+        engagementScore: 0,
+        salesHistory: [],
+        attendance: [],
+        vacationDaysUsed: 0,
+        sickDaysUsed: 0,
+        inviteCode: code,
+        createdAt: new Date()
+      });
+    }
     if (isOwnerRole) {
-      membership.employeeId = empRef.id;
+      membership.employeeId = employeeId;
       await setDoc(doc(db, 'users', user.uid), {
         driverMemberships: [...priorMemberships, membership]
       }, { merge: true });
     } else {
-      await updateDoc(doc(db, 'users', user.uid), { employeeId: empRef.id });
+      await updateDoc(doc(db, 'users', user.uid), { employeeId });
     }
 
     // (3) Count + redemption on the global invite doc (owner UI reads here).
