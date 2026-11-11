@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { todayId, useDriverDay } from '../contexts/DriverDayContext';
-import type { Stop } from '../types';
+import { CaptureButton } from './CaptureButton';
+import type { CaptureType, Stop } from '../types';
 
 const statusPill: Record<string, { label: string; cls: string }> = {
   pending: { label: 'Pending', cls: 'bg-slate-100 text-slate-600' },
@@ -131,7 +132,148 @@ const KpiCards: React.FC = () => {
   );
 };
 
-export const TodayScreen: React.FC<{ onOpenStop: (stop: Stop) => void }> = ({ onOpenStop }) => {
+/** The three captures the guide asks for at every stop (Chris, 2026-11-10). */
+const STOP_CAPTURES: Array<{ type: CaptureType; label: string; icon: string }> = [
+  { type: 'stales', label: 'Stales ticket', icon: 'fa-camera' },
+  { type: 'shelf', label: 'Shelf pics', icon: 'fa-camera' },
+  { type: 'receipt', label: 'Sales ticket', icon: 'fa-camera' },
+];
+
+const mapsUrl = (stop: Stop) =>
+  `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(
+    `${stop.name}, ${stop.address}`,
+  )}`;
+
+/**
+ * The guided day (Chris's directive, 2026-11-10): the Today tab walks
+ * the driver through the day ONE prompt at a time — depot pics first
+ * (that capture opens the day), then the next stop with its Navigate
+ * button and its three captures; finishing a stop's captures advances
+ * the guide to the next stop. Everything is a capture, never typing.
+ * The stop list below the guide stays as the overview/jump list.
+ */
+const GuidedDay: React.FC<{ onGoEod?: () => void }> = ({ onGoEod }) => {
+  const { route, captures, visits, updateVisit, dayStartedAt } = useDriverDay();
+  const date = todayId();
+
+  const hasCapture = (type: CaptureType, storeId?: string) =>
+    captures.some((c) => c.type === type && (storeId === undefined || c.storeId === storeId));
+
+  const depotDone = hasCapture('depot');
+  const stops = route?.stops ?? [];
+  const stopDone = (s: Stop) => STOP_CAPTURES.every((sc) => hasCapture(sc.type, s.id));
+  const currentStop = stops.find((s) => !stopDone(s)) ?? null;
+  const doneCount = stops.filter((s) => stopDone(s)).length;
+
+  // Completing a stop's three captures marks the visit done (which is
+  // what the EOD stops derivation counts) and the guide advances.
+  useEffect(() => {
+    for (const s of stops) {
+      const key = `${date}:${s.id}`;
+      if (stopDone(s) && visits[key]?.status !== 'done') {
+        updateVisit(s.id, {
+          status: 'done',
+          arrivedAt: visits[key]?.arrivedAt ?? new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+        });
+      } else if (!stopDone(s) && hasCapture('stales', s.id) && visits[key]?.status !== 'arrived' && visits[key]?.status !== 'done') {
+        updateVisit(s.id, { status: 'arrived', arrivedAt: new Date().toISOString() });
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [captures, route?.id]);
+
+  if (!route) return null;
+
+  // Step 1 — depot first: this capture opens the day.
+  if (!depotDone) {
+    return (
+      <div className="mb-4 rounded-2xl border-2 border-black bg-white px-5 py-5 shadow-sm">
+        <p className="text-xs font-bold uppercase tracking-widest text-slate-400">Start here</p>
+        <h3 className="mt-1 text-lg font-black uppercase tracking-tight">At the depot</h3>
+        <p className="mt-1 text-sm text-slate-600">
+          Take the load and truck photos to start your day. That is all you need to do here —
+          the app reads the numbers from the photos.
+        </p>
+        <div className="mt-4">
+          <CaptureButton type="depot" label="Depot photos" icon="fa-camera" big />
+        </div>
+      </div>
+    );
+  }
+
+  // Every stop captured: the day is run; EOD pulls from these captures.
+  if (stops.length > 0 && !currentStop) {
+    return (
+      <div className="mb-4 rounded-2xl border border-green-200 bg-green-50 px-5 py-5">
+        <h3 className="text-lg font-black uppercase tracking-tight text-green-900">
+          All {stops.length} stops done
+        </h3>
+        <p className="mt-1 text-sm text-green-800">
+          Every stop's captures are in. Your end-of-day report is built from them — head there
+          to finish.
+        </p>
+        {onGoEod && (
+          <button
+            type="button"
+            onClick={onGoEod}
+            className="mt-4 w-full rounded-2xl bg-black py-4 text-base font-black uppercase tracking-tight text-[#FFD700]"
+          >
+            <i className="fa-solid fa-clipboard-check mr-2" /> Go to End of Day
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  if (!currentStop) return null;
+
+  // Step 2+ — the next stop, its Navigate button, its three captures.
+  const idx = stops.indexOf(currentStop);
+  return (
+    <div className="mb-4 rounded-2xl border-2 border-black bg-white px-5 py-5 shadow-sm">
+      <div className="flex items-baseline justify-between">
+        <p className="text-xs font-bold uppercase tracking-widest text-slate-400">
+          {dayStartedAt ? 'Next stop' : 'First stop'} · {idx + 1} of {stops.length}
+        </p>
+        <p className="text-xs font-bold text-slate-500">
+          {doneCount} done
+        </p>
+      </div>
+      <h3 className="mt-1 text-xl font-black tracking-tight">{currentStop.name}</h3>
+      <p className="text-sm text-slate-500">{currentStop.address}</p>
+      <a
+        href={mapsUrl(currentStop)}
+        target="_blank"
+        rel="noreferrer"
+        className="mt-3 flex w-full items-center justify-center gap-2 rounded-2xl border-2 border-black py-3.5 text-sm font-black uppercase tracking-tight text-black"
+      >
+        <i className="fa-solid fa-location-arrow" /> Navigate
+      </a>
+      <div className="mt-3 space-y-2">
+        {STOP_CAPTURES.map((sc) => (
+          <CaptureButton
+            key={sc.type}
+            type={sc.type}
+            label={sc.label}
+            icon={sc.icon}
+            storeId={currentStop.id}
+            storeName={currentStop.name}
+            done={hasCapture(sc.type, currentStop.id)}
+          />
+        ))}
+      </div>
+      <p className="mt-3 text-xs text-slate-500">
+        Take all three and the guide moves you to the next stop on its own.
+      </p>
+    </div>
+  );
+};
+
+export const TodayScreen: React.FC<{
+  onOpenStop: (stop: Stop) => void;
+  onGoEod?: () => void;
+}> = ({ onOpenStop, onGoEod }) => {
   const { loading, routes, route, setActiveRouteId, dayStartedAt, startDay, visits } =
     useDriverDay();
 
@@ -183,6 +325,13 @@ export const TodayScreen: React.FC<{ onOpenStop: (stop: Stop) => void }> = ({ on
       )}
 
       <KpiCards />
+
+      <GuidedDay onGoEod={onGoEod} />
+
+      <div className="mb-4 grid grid-cols-2 gap-2">
+        <CaptureButton type="transfer" label="Transfer" icon="fa-right-left" />
+        <CaptureButton type="other" label="Other photo" icon="fa-camera" />
+      </div>
 
       {!dayStartedAt ? (
         <button
